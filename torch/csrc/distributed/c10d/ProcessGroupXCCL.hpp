@@ -76,13 +76,14 @@ class ProcessGroupXCCL : public Backend {
       }
     }
 
-    void wait() {
-      std::unique_lock<std::timed_mutex> lock(mutex_);
-      for (auto& event : events_) {
-        event.wait();
-      }
-      events_.clear();
-    }
+    bool wait(std::chrono::milliseconds timeout = kNoTimeout) override;
+    // void wait() {
+    //   std::unique_lock<std::timed_mutex> lock(mutex_);
+    //   for (auto& event : events_) {
+    //     event.wait();
+    //   }
+    //   events_.clear();
+    // }
     
     c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
       return future_;

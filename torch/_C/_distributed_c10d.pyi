@@ -698,11 +698,10 @@ class ProcessGroupCudaP2P(Backend):
     ) -> torch.Tensor: ...
     def _shutdown(self) -> None: ...
 
-class ProcessGroupXCC(Backend):
+class ProcessGroupXCCL(Backend):
     def __init__(
         self,
         store: Store,
         rank: int,
         size: int,
-        timeout: timedelta,
     ): ...
