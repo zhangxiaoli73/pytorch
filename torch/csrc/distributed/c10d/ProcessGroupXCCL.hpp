@@ -11,6 +11,8 @@
 
 #include <oneapi/ccl.hpp>
 #include <torch/csrc/xpu/xccl.h>
+#include <torch/csrc/xpu/Stream.h>
+#include <torch/csrc/xpu/Event.h>
 #include <exception>
 #include <memory>
 #include <vector>
@@ -77,13 +79,7 @@ class ProcessGroupXCCL : public Backend {
       TORCH_CHECK(false, "ProcessGroupXCCL::WorkXCCL::abort not implemented");
     }
 
-    void synchronize() override {
-      TORCH_CHECK(
-          false, "ProcessGroupXCCL::WorkXCCL::synchronize not implemented");
-      // for (auto& event : events_) {
-      //   event.wait();
-      // }
-    }
+    void synchronize() override;
 
     bool wait(std::chrono::milliseconds timeout = kNoTimeout) override;
     // void wait() {
@@ -106,6 +102,7 @@ class ProcessGroupXCCL : public Backend {
 
    protected:
     at::Device device_;
+    std::shared_ptr<at::xpu::XPUEvent> xcclEndEvent_;
     // std::vector<ccl::event> events_;
     // std::shared_ptr<xcclComm_t> xcclComm_;
     // const std::vector<std::vector<at::Tensor>> outputTensors_;
@@ -121,7 +118,7 @@ class ProcessGroupXCCL : public Backend {
       int size)
       : store_(store), Backend(rank, size) {}
 
-  ~ProcessGroupXCCL() = default;
+  ~ProcessGroupXCCL() override;
 
   const std::string getBackendName() const override {
     return std::string(XCCL_BACKEND_NAME);
@@ -140,6 +137,7 @@ class ProcessGroupXCCL : public Backend {
       int size = -1);
 
  public:
+  std::unordered_map<std::string, at::xpu::XPUStream> xcclStreams_;
   std::unordered_map<std::string, std::shared_ptr<xcclComm_t>>
       inInitializationCommMap_;
   std::unordered_map<std::string, std::shared_ptr<xcclComm_t>> devXCCLCommMap_;

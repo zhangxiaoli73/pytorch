@@ -45,7 +45,7 @@ std::map<at::ScalarType, ccl::datatype> xcclDatatypes = {
     {at::kBool, ccl::datatype::uint8},
 };
 
-void check_gpu_single_tensor(const at::Tensor& tensor) {
+void check_xpu_single_tensor(const at::Tensor& tensor) {
   if (!tensor.is_xpu() || tensor.is_sparse()) {
     C10_THROW_ERROR(ValueError, "Tensors must be XPU and dense");
   }
@@ -65,33 +65,31 @@ ccl::datatype getXcclDataType(at::ScalarType type) {
 }
 } // namespace
 
-
-
 static std::mutex xcclCommDevIdxMapMutex;
 static std::unordered_map<std::shared_ptr<xcclComm_t>, int> xcclCommDevIdxMap;
 
-template <
-    template <typename, typename, typename, typename, typename>
-    class WorkXCCL,
-    typename RunF,
-    typename CommType,
-    typename InputType,
-    typename OutputType,
-    typename attr_t>
-c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> make_work_ccl(
-    const std::vector<InputType>& inputs,
-    const std::vector<OutputType>& outputs,
-    RunF f,
-    CommType& comms,
-    attr_t& attr,
-    int rank,
-    c10d::OpType op_type) {
-  c10::intrusive_ptr<WorkCCL<RunF, CommType, InputType, OutputType, attr_t>>
-      ret_ptr = c10::make_intrusive<
-          WorkCCL<RunF, CommType, InputType, OutputType, attr_t>>(
-          inputs, outputs, f, comms, attr, rank, op_type);
-  return ret_ptr;
-}
+// template <
+//     template <typename, typename, typename, typename, typename>
+//     class WorkXCCL,
+//     typename RunF,
+//     typename CommType,
+//     typename InputType,
+//     typename OutputType,
+//     typename attr_t>
+// c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> make_work_ccl(
+//     const std::vector<InputType>& inputs,
+//     const std::vector<OutputType>& outputs,
+//     RunF f,
+//     CommType& comms,
+//     attr_t& attr,
+//     int rank,
+//     c10d::OpType op_type) {
+//   c10::intrusive_ptr<WorkCCL<RunF, CommType, InputType, OutputType, attr_t>>
+//       ret_ptr = c10::make_intrusive<
+//           WorkCCL<RunF, CommType, InputType, OutputType, attr_t>>(
+//           inputs, outputs, f, comms, attr, rank, op_type);
+//   return ret_ptr;
+// }
 
 // ProcessGroupXCCL::WorkXCCL::WorkXCCL(
 //     std::vector<std::vector<at::Tensor>> outputTensors,
@@ -107,16 +105,26 @@ ProcessGroupXCCL::WorkXCCL::WorkXCCL(
     int rank,
     OpType opType,
     const std::optional<std::vector<at::Tensor>>& inputs)
-    : Work(rank, opType, "profilingTitle", inputs), device_(device) {}
+    : Work(rank, opType, "profilingTitle", inputs), device_(device) {
+  unsigned char enable_timing = 0;
+  xcclEndEvent_ = std::make_shared<at::xpu::XPUEvent>(enable_timing);
+}
 
 ProcessGroupXCCL::WorkXCCL::WorkXCCL(const WorkXCCL& w)
-    : Work(w.rank_, w.opType_), device_(w.device_) {}
+    : Work(w.rank_, w.opType_), device_(w.device_),
+      xcclEndEvent_(w.xcclEndEvent_) {}
 
 ProcessGroupXCCL::WorkXCCL::~WorkXCCL() = default;
 
 c10::intrusive_ptr<c10::ivalue::Future> ProcessGroupXCCL::WorkXCCL::
     getFuture() {
   return future_;
+}
+
+void ProcessGroupXCCL::WorkXCCL::synchronize() {
+  auto currentStream = at::xpu::getCurrentXPUStream(device_.index());
+  // Block the current stream on the XCCL stream
+  xcclEndEvent_->block(currentStream);
 }
 
 c10::intrusive_ptr<Backend> ProcessGroupXCCL::createProcessGroupXCCL(
@@ -133,6 +141,20 @@ ProcessGroupXCCL::ProcessGroupXCCL(
     : Backend(rank, size), store_(store) {}
 
 ProcessGroupXCCL::~ProcessGroupXCCL() = default;
+
+c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> ProcessGroupXCCL::initWork(
+    at::Device& device,
+    int rank,
+    OpType opType,
+    const std::vector<at::Tensor>& inputs,
+    const std::vector<at::Tensor>& outputs) {
+  auto r = c10::make_intrusive<ProcessGroupXCCL::WorkXCCL>(
+      device,
+      rank,
+      opType,
+      std::optional<std::vector<at::Tensor>>(inputs));
+  return r;
+}
 
 std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
     const std::string& deviceKey,
@@ -162,7 +184,7 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   ccl::vector_class<ccl::pair_class<int, ccl::device>> devs_rank;
   c10::impl::VirtualGuardImpl impl(device.type());
   c10::Stream stream = impl.getStream(device);
-  auto q = get_sycl_queue(stream);
+  auto q = at::xpu::XPUStream(stream).queue();
   auto ctx = ccl::create_context(q.get_context());
   devs_rank.emplace_back(rank, ccl::create_device(q.get_device()));
   XCCLComm = ccl::create_communicator(numRanks, devs_rank, ctx, kvs);
@@ -171,6 +193,8 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
     std::lock_guard<std::mutex> lock(mutex_);
     inInitializationCommMap_.emplace(deviceKey, XCCLComm);
   }
+
+  xcclStreams_.emplace(deviceKey, std::move(stream));
 
   auto it = inInitializationCommMap_.find(deviceKey);
   if (it != inInitializationCommMap_.end()) {
@@ -203,21 +227,38 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
 
   auto device = input.device();
   const auto key = std::to_string(device.index());
-  auto xcclComm_t = getXCCLComm(key, device);
+  auto comm = getXCCLComm(key, device);
 
+  auto xcclStream = xcclStreams_.at(key);
   std::vector<at::Tensor> inputs{input};
   std::vector<at::Tensor> outputs{output};
 
   c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
 
-  work = make_work_ccl<WorkXCCL>(
-      inputs, outputs, fn, xcclComm_t, attr, rank_, op_type);
+  work =initWork(device, rank_, op_type);
+  // work = make_work_ccl<WorkXCCL>(
+  //     inputs, outputs, fn, xcclComm_t, attr, rank_, op_type);
   // work->events_.emplace_back(fn);
+  work->outputs_ =
+      std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
+  c10::xpu::XPUCachingAllocator::recordStream(
+      input.storage().data_ptr(), xcclStream);
+  
+  auto ccl_stream = ccl::create_stream(at::xpu::XPUStream(xcclStream).queue());
+  fn(input, output, attr, comm, ccl_stream);
+
+  work->xcclEndEvent_->record(xcclStream);
+  c10::MultiStreamGuard streamGuard(xcclStream);
+  std::vector<at::Device> devices{device};
+  work->future_ = c10::make_intrusive<at::ivalue::Future>(
+      c10::ListType::create(c10::TensorType::get()), devices);
+  work->future_->markCompleted(at::IValue(*work->outputs_));
+
   return work;
 }
 
 template <typename Fn>
-c10::intrusive_ptr<Work> ProcessGroupNCCL::collective(
+c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
     at::Tensor& input,
     at::Tensor& output,
     Fn fn,
@@ -237,7 +278,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
   TORCH_CHECK(
       tensors.size() == 1, "Expecting one tensor only but got multiple");
   auto tensor = tensors.back();
-  check_gpu_single_tensor(tensor);
+  check_xpu_single_tensor(tensor);
   if (opts.reduceOp == ReduceOp::AVG) {
     TORCH_CHECK(false, "Cannot use ReduceOp AVG with XPU")
   }
