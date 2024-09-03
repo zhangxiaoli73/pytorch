@@ -1154,7 +1154,7 @@ endif()
 if(USE_XCCL)
   if(NOT USE_XPU)
     message(WARNING
-        "Not using XPU, so disabling USE_NUSE_XCCLCCL. Suppress this warning with "
+        "Not using XPU, so disabling USE_XCCL. Suppress this warning with "
         "-DUSE_XCCL=OFF.")
     caffe2_update_option(USE_XCCL OFF)
   elseif(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")

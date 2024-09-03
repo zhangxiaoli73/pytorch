@@ -27,7 +27,7 @@ find_file(
   NO_DEFAULT_PATH
 )
 
-# Find include/sycl path from include path.
+# Find include/oneapi path from include path.
 find_file(
   XCCL_INCLUDE_ONEAPI_DIR
   NAMES oneapi
