@@ -87,6 +87,7 @@ __all__ = [
     "is_nccl_available",
     "is_torchelastic_launched",
     "is_ucc_available",
+    "is_xccl_available",
     "isend",
     "monitored_barrier",
     "new_group",
