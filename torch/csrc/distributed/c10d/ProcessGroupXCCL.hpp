@@ -38,27 +38,34 @@ class ProcessGroupXCCL : public Backend {
   class WorkXCCL : public Work {
    public:
     WorkXCCL(
-        std::vector<std::vector<at::Tensor>> outputTensors,
-        int rank = -1,
-        OpType opType = OpType::UNKNOWN,
-        const c10::optional<std::vector<at::Tensor>>& inputTensors =
-            c10::nullopt)
-        : Work(rank, opType), outputTensors_(std::move(outputTensors)) {}
-
-    ~WorkXCCL() override {
-      // Ensures all events are properly handled before destruction
-      for (auto& event : events_) {
-        event.wait();
-      }
-    }
-
+        at::Device& device,
+        int rank,
+        OpType opType,
+        const std::optional<std::vector<at::Tensor>>& inputs = std::nullopt);
+    // WorkXCCL(
+    //     std::vector<std::vector<at::Tensor>> outputTensors,
+    //     int rank = -1,
+    //     OpType opType = OpType::UNKNOWN,
+    //     const c10::optional<std::vector<at::Tensor>>& inputTensors =
+    //         c10::nullopt)
+    //     : Work(rank, opType), outputTensors_(std::move(outputTensors)) {}
+    WorkXCCL(const WorkXCCL& w);
+    // ~WorkXCCL() override {
+    //   // Ensures all events are properly handled before destruction
+    //   for (auto& event : events_) {
+    //     event.wait();
+    //   }
+    // }
+    ~WorkXCCL() override;
     bool isCompleted() override {
-      for (auto& event : events_) {
-        if (!event.test()) {
-          return false;
-        }
-      }
-      return true;
+      TORCH_CHECK(
+          false, "ProcessGroupXCCL::WorkXCCL::isCompleted not implemented");
+      // for (auto& event : events_) {
+      //   if (!event.test()) {
+      //     return false;
+      //   }
+      // }
+      // return true;
     }
 
     bool isSuccess() const override {
@@ -71,9 +78,11 @@ class ProcessGroupXCCL : public Backend {
     }
 
     void synchronize() override {
-      for (auto& event : events_) {
-        event.wait();
-      }
+      TORCH_CHECK(
+          false, "ProcessGroupXCCL::WorkXCCL::synchronize not implemented");
+      // for (auto& event : events_) {
+      //   event.wait();
+      // }
     }
 
     bool wait(std::chrono::milliseconds timeout = kNoTimeout) override;
@@ -84,28 +93,33 @@ class ProcessGroupXCCL : public Backend {
     //   }
     //   events_.clear();
     // }
-    
+
     c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
       return future_;
     }
 
     std::vector<at::Tensor> result() override {
-      return outputTensors_.empty() ? std::vector<at::Tensor>()
-                                    : outputTensors_[0];
+      TORCH_CHECK(false, "ProcessGroupXCCL::WorkXCCL::result not implemented");
+      // return outputTensors_.empty() ? std::vector<at::Tensor>()
+      //                               : outputTensors_[0];
     }
 
    protected:
-    friend class ProcessGroupXCCL;
-    std::vector<ccl::event> events_;
-    const std::vector<std::vector<at::Tensor>> outputTensors_;
+    at::Device device_;
+    // std::vector<ccl::event> events_;
+    // std::shared_ptr<xcclComm_t> xcclComm_;
+    // const std::vector<std::vector<at::Tensor>> outputTensors_;
+   private:
+    std::shared_ptr<std::vector<at::Tensor>> outputs_;
     c10::intrusive_ptr<at::ivalue::Future> future_;
+    friend class ProcessGroupXCCL;
   };
 
   explicit ProcessGroupXCCL(
       const c10::intrusive_ptr<Store>& store,
       int rank,
       int size)
-      : store_(store), Backend(rank, size)  {}
+      : store_(store), Backend(rank, size) {}
 
   ~ProcessGroupXCCL() = default;
 

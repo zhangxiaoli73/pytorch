@@ -53,7 +53,6 @@ void check_gpu_single_tensor(const at::Tensor& tensor) {
     C10_THROW_ERROR(ValueError, "Tensors must be contiguous");
   }
 }
-} // namespace
 
 ccl::datatype getXcclDataType(at::ScalarType type) {
   auto it = xcclDatatypes.find(type);
@@ -64,6 +63,9 @@ ccl::datatype getXcclDataType(at::ScalarType type) {
       type);
   return it->second;
 }
+} // namespace
+
+
 
 static std::mutex xcclCommDevIdxMapMutex;
 static std::unordered_map<std::shared_ptr<xcclComm_t>, int> xcclCommDevIdxMap;
@@ -91,14 +93,26 @@ c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> make_work_ccl(
   return ret_ptr;
 }
 
+// ProcessGroupXCCL::WorkXCCL::WorkXCCL(
+//     std::vector<std::vector<at::Tensor>> outputTensors,
+//     int rank,
+//     c10d::OpType opType,
+//     const c10::optional<std::vector<at::Tensor>>& inputTensors)
+//     : Work(rank, opType, nullptr, inputTensors),
+//       outputTensors_(std::move(outputTensors)),
+//       future_(createFutureAsOutput(outputTensors)) {}
+
 ProcessGroupXCCL::WorkXCCL::WorkXCCL(
-    std::vector<std::vector<at::Tensor>> outputTensors,
+    at::Device& device,
     int rank,
-    c10d::OpType opType,
-    const c10::optional<std::vector<at::Tensor>>& inputTensors)
-    : Work(rank, opType, nullptr, inputTensors),
-      outputTensors_(std::move(outputTensors)),
-      future_(createFutureAsOutput(outputTensors)) {}
+    OpType opType,
+    const std::optional<std::vector<at::Tensor>>& inputs)
+    : Work(rank, opType, "profilingTitle", inputs), device_(device) {}
+
+ProcessGroupXCCL::WorkXCCL::WorkXCCL(const WorkXCCL& w)
+    : Work(w.rank_, w.opType_), device_(w.device_) {}
+
+ProcessGroupXCCL::WorkXCCL::~WorkXCCL() = default;
 
 c10::intrusive_ptr<c10::ivalue::Future> ProcessGroupXCCL::WorkXCCL::
     getFuture() {
@@ -198,7 +212,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
 
   work = make_work_ccl<WorkXCCL>(
       inputs, outputs, fn, xcclComm_t, attr, rank_, op_type);
-
+  // work->events_.emplace_back(fn);
   return work;
 }
 
