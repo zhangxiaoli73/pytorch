@@ -3,7 +3,7 @@
 #include <mutex>
 #include <sstream>
 
-#ifdef USE_C10D_XCCL
+// #ifdef USE_C10D_XCCL
 #include <exception>
 #include <map>
 #include <stdexcept>
@@ -68,38 +68,6 @@ ccl::datatype getXcclDataType(at::ScalarType type) {
 static std::mutex xcclCommDevIdxMapMutex;
 static std::unordered_map<std::shared_ptr<xcclComm_t>, int> xcclCommDevIdxMap;
 
-// template <
-//     template <typename, typename, typename, typename, typename>
-//     class WorkXCCL,
-//     typename RunF,
-//     typename CommType,
-//     typename InputType,
-//     typename OutputType,
-//     typename attr_t>
-// c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> make_work_ccl(
-//     const std::vector<InputType>& inputs,
-//     const std::vector<OutputType>& outputs,
-//     RunF f,
-//     CommType& comms,
-//     attr_t& attr,
-//     int rank,
-//     c10d::OpType op_type) {
-//   c10::intrusive_ptr<WorkCCL<RunF, CommType, InputType, OutputType, attr_t>>
-//       ret_ptr = c10::make_intrusive<
-//           WorkCCL<RunF, CommType, InputType, OutputType, attr_t>>(
-//           inputs, outputs, f, comms, attr, rank, op_type);
-//   return ret_ptr;
-// }
-
-// ProcessGroupXCCL::WorkXCCL::WorkXCCL(
-//     std::vector<std::vector<at::Tensor>> outputTensors,
-//     int rank,
-//     c10d::OpType opType,
-//     const c10::optional<std::vector<at::Tensor>>& inputTensors)
-//     : Work(rank, opType, nullptr, inputTensors),
-//       outputTensors_(std::move(outputTensors)),
-//       future_(createFutureAsOutput(outputTensors)) {}
-
 ProcessGroupXCCL::WorkXCCL::WorkXCCL(
     at::Device& device,
     int rank,
@@ -115,6 +83,11 @@ ProcessGroupXCCL::WorkXCCL::WorkXCCL(const WorkXCCL& w)
       xcclEndEvent_(w.xcclEndEvent_) {}
 
 ProcessGroupXCCL::WorkXCCL::~WorkXCCL() = default;
+
+bool ProcessGroupXCCL::WorkXCCL::wait(std::chrono::milliseconds timeout) {
+  synchronize();
+  return true;
+}
 
 c10::intrusive_ptr<c10::ivalue::Future> ProcessGroupXCCL::WorkXCCL::
     getFuture() {
@@ -267,8 +240,10 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
       input,
       output,
       fn,
-      [](std::vector<ccl::stream>&) {},
-      [](std::vector<ccl::stream>&) {},
+      [](at::xpu::XPUStream&,
+         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+      [](at::xpu::XPUStream&,
+         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
       opType);
 }
 
@@ -306,9 +281,6 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
       OpType::ALLREDUCE);
 }
 
-// c10::intrusive_ptr<Work> barrier(
-//     const BarrierOptions& opts = BarrierOptions()) override;
-
 } // namespace c10d
 
-#endif // USE_C10D_XCCL
+// #endif // USE_C10D_XCCL

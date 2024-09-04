@@ -7,7 +7,7 @@
 #include <unistd.h>
 #endif
 
-#ifdef USE_C10D_XCCL
+// #ifdef USE_C10D_XCCL
 
 #include <oneapi/ccl.hpp>
 #include <torch/csrc/xpu/xccl.h>
@@ -35,7 +35,7 @@ namespace c10d {
 constexpr const char* XCCL_BACKEND_NAME = "xccl";
 using namespace torch::xpu::xccl;
 
-class ProcessGroupXCCL : public Backend {
+class TORCH_XPU_API ProcessGroupXCCL : public Backend {
  public:
   class WorkXCCL : public Work {
    public:
@@ -82,13 +82,6 @@ class ProcessGroupXCCL : public Backend {
     void synchronize() override;
 
     bool wait(std::chrono::milliseconds timeout = kNoTimeout) override;
-    // void wait() {
-    //   std::unique_lock<std::timed_mutex> lock(mutex_);
-    //   for (auto& event : events_) {
-    //     event.wait();
-    //   }
-    //   events_.clear();
-    // }
 
     c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
       return future_;
@@ -96,8 +89,6 @@ class ProcessGroupXCCL : public Backend {
 
     std::vector<at::Tensor> result() override {
       TORCH_CHECK(false, "ProcessGroupXCCL::WorkXCCL::result not implemented");
-      // return outputTensors_.empty() ? std::vector<at::Tensor>()
-      //                               : outputTensors_[0];
     }
 
    protected:
@@ -147,4 +138,4 @@ class ProcessGroupXCCL : public Backend {
 
 } // namespace c10d
 
-#endif // USE_C10D_XCCL
+// #endif // USE_C10D_XCCL

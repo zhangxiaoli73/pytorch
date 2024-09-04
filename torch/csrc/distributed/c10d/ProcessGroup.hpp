@@ -70,6 +70,7 @@ class TORCH_API ProcessGroup : public torch::CustomClassHolder {
     UCC = 3,
     MPI = 4,
     CUSTOM = 5,
+    XCCL = 6,
   };
 
   // Not used, set for backwards compatibility and only used for TypeDef in
