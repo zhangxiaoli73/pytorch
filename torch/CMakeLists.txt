@@ -165,6 +165,9 @@ if(USE_XPU)
     append_filelist("libtorch_python_xpu_sources" TORCH_PYTHON_SRCS)
 
     list(APPEND TORCH_PYTHON_COMPILE_DEFINITIONS USE_XPU)
+    # if(USE_XCCL)
+    list(APPEND TORCH_PYTHON_LINK_LIBRARIES torch::xpurt)
+    # endif()
 endif()
 
 if(USE_CUDNN OR USE_ROCM)
@@ -419,6 +422,8 @@ endif()
 target_compile_definitions(torch_python PRIVATE "-DTHP_BUILD_MAIN_LIB")
 
 target_link_libraries(torch_python PRIVATE ${TORCH_LIB} ${TORCH_PYTHON_LINK_LIBRARIES})
+target_link_libraries(torch_python PRIVATE torch::xpurt)
+target_link_libraries(torch_python PRIVATE c10_xpu)
 
 target_compile_definitions(torch_python PRIVATE ${TORCH_PYTHON_COMPILE_DEFINITIONS})
 

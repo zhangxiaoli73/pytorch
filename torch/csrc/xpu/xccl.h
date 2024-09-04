@@ -6,6 +6,8 @@
 #include <optional>
 #include <vector>
 #include <torch/csrc/distributed/c10d/Store.hpp>
+#include <torch/csrc/xpu/Stream.h>
+#include <torch/csrc/xpu/Event.h>
 
 namespace torch::xpu::xccl {
 

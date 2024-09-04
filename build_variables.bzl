@@ -542,7 +542,6 @@ libtorch_distributed_extra_sources = [
     "torch/csrc/distributed/autograd/rpc_messages/rref_backward_req.cpp",
     "torch/csrc/distributed/autograd/rpc_messages/rref_backward_resp.cpp",
     "torch/csrc/distributed/c10d/HashStore.cpp",
-    "torch/csrc/distributed/c10d/ProcessGroupXCCL.cpp",
     "torch/csrc/distributed/rpc/agent_utils.cpp",
     "torch/csrc/distributed/rpc/message.cpp",
     "torch/csrc/distributed/rpc/profiler/remote_profiler_manager.cpp",
@@ -787,6 +786,7 @@ libtorch_python_cuda_sources = libtorch_python_cuda_core_sources + [
 
 libtorch_python_xpu_sources = [
     "torch/csrc/xpu/xccl.cpp",
+    "torch/csrc/distributed/c10d/ProcessGroupXCCL.cpp",
     "torch/csrc/xpu/Event.cpp",
     "torch/csrc/xpu/Module.cpp",
     "torch/csrc/xpu/Stream.cpp",

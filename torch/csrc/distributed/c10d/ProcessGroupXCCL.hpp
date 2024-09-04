@@ -11,8 +11,6 @@
 
 #include <oneapi/ccl.hpp>
 #include <torch/csrc/xpu/xccl.h>
-#include <torch/csrc/xpu/Stream.h>
-#include <torch/csrc/xpu/Event.h>
 #include <exception>
 #include <memory>
 #include <vector>

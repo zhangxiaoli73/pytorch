@@ -1015,13 +1015,12 @@ endif()
 
 if(USE_XPU)
   if(USE_XCCL)
-  list(APPEND Caffe2_XPU_SRCS
-    ${TORCH_SRC_DIR}/csrc/xpu/xccl.cpp)
+    list(APPEND Caffe2_XPU_SRCS
+      ${TORCH_SRC_DIR}/csrc/xpu/xccl.cpp)
   endif()
   add_library(torch_xpu ${Caffe2_XPU_SRCS})
   torch_compile_options(torch_xpu)  # see cmake/public/utils.cmake
   target_compile_definitions(torch_xpu PRIVATE USE_XPU)
-
   # ATen XPU implementation
   set(TORCH_XPU_OPS_DIR ${TORCH_ROOT}/third_party/torch-xpu-ops)
   set(TORCH_XPU_OPS_REPO_URL https://github.com/intel/torch-xpu-ops.git)
