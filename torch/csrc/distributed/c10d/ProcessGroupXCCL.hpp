@@ -8,9 +8,11 @@
 #endif
 
 // #ifdef USE_C10D_XCCL
-
 #include <oneapi/ccl.hpp>
-#include <torch/csrc/xpu/xccl.h>
+#include <torch/csrc/distributed/c10d/Store.hpp>
+#include <torch/csrc/xpu/Event.h>
+#include <torch/csrc/xpu/Stream.h>
+// #include <torch/csrc/xpu/xccl.h>
 #include <exception>
 #include <memory>
 #include <vector>
@@ -24,14 +26,17 @@
 #include <thread>
 #include <unordered_map>
 
+#include <c10/core/StreamGuard.h>
+#include <c10/xpu/XPUCachingAllocator.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/PrefixStore.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
-
 namespace c10d {
 
+using xcclComm_t = ccl::communicator;
+using XCCL_KVS = ccl::shared_ptr_class<ccl::kvs>;
 constexpr const char* XCCL_BACKEND_NAME = "xccl";
-using namespace torch::xpu::xccl;
+// using namespace torch::xpu::xccl;
 
 class TORCH_XPU_API ProcessGroupXCCL : public Backend {
  public:
@@ -112,6 +117,33 @@ class TORCH_XPU_API ProcessGroupXCCL : public Backend {
   const std::string getBackendName() const override {
     return std::string(XCCL_BACKEND_NAME);
   }
+
+  std::shared_ptr<xcclComm_t> getXCCLComm(
+      const std::string& deviceKey,
+      at::Device& device);
+
+  virtual c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> initWork(
+      at::Device& device,
+      int rank,
+      OpType opType,
+      const std::vector<at::Tensor>& inputs = {},
+      const std::vector<at::Tensor>& outputs = {});
+
+  template <typename Fn>
+  c10::intrusive_ptr<Work> collective(
+      at::Tensor& input,
+      at::Tensor& output,
+      Fn fn,
+      OpType opType);
+
+  template <typename Fn, typename PreProcess, typename PostProcess>
+  c10::intrusive_ptr<Work> collective(
+      at::Tensor& input,
+      at::Tensor& output,
+      Fn fn,
+      PreProcess pre,
+      PostProcess post,
+      OpType opType);
 
   c10::intrusive_ptr<Work> allreduce(
       std::vector<at::Tensor>& tensors,

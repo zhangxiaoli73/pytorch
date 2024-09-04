@@ -1014,10 +1014,10 @@ elseif(USE_CUDA)
 endif()
 
 if(USE_XPU)
-  if(USE_XCCL)
-    list(APPEND Caffe2_XPU_SRCS
-      ${TORCH_SRC_DIR}/csrc/xpu/xccl.cpp)
-  endif()
+  # if(USE_XCCL)
+  #   list(APPEND Caffe2_XPU_SRCS
+  #     ${TORCH_SRC_DIR}/csrc/xpu/xccl.cpp)
+  # endif()
   add_library(torch_xpu ${Caffe2_XPU_SRCS})
   torch_compile_options(torch_xpu)  # see cmake/public/utils.cmake
   target_compile_definitions(torch_xpu PRIVATE USE_XPU)

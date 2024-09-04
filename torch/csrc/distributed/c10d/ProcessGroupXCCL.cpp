@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include <ATen/detail/FunctionTraits.h>
 #include <c10/core/DeviceType.h>
 #include <c10/util/CallOnce.h>
 #include <c10/util/Exception.h>
@@ -44,6 +45,36 @@ std::map<at::ScalarType, ccl::datatype> xcclDatatypes = {
     {at::kBFloat16, ccl::datatype::bfloat16},
     {at::kBool, ccl::datatype::uint8},
 };
+
+XCCL_KVS kvs;
+std::mutex kvs_mutex;
+
+XCCL_KVS get_kvs(int rank, c10d::Store& store) {
+  std::lock_guard<std::mutex> lock(kvs_mutex);
+  if (kvs)
+    return kvs;
+  std::string storeKey = "ccl_kvs";
+
+  // Rank 0 broadcast the bootstrap network information to other ranks
+  if (rank == 0) {
+    kvs = ccl::create_main_kvs();
+    ccl::kvs::address_type main_addr = kvs->get_address();
+    auto ccl_kvs_addr =
+        std::vector<uint8_t>(main_addr.begin(), main_addr.end());
+    store.set(storeKey, ccl_kvs_addr);
+  } else {
+    auto ccl_kvs_addr = store.get(storeKey);
+    if (ccl_kvs_addr.size() != ccl::kvs::address_max_size) {
+      throw std::runtime_error("Unexpected ccl kvs addr from the store\n");
+    }
+    ccl::kvs::address_type main_addr;
+    std::copy_n(
+        ccl_kvs_addr.begin(), ccl::kvs::address_max_size, main_addr.begin());
+    kvs = ccl::create_kvs(main_addr);
+  }
+
+  return kvs;
+}
 
 void check_xpu_single_tensor(const at::Tensor& tensor) {
   if (!tensor.is_xpu() || tensor.is_sparse()) {
@@ -89,11 +120,6 @@ bool ProcessGroupXCCL::WorkXCCL::wait(std::chrono::milliseconds timeout) {
   return true;
 }
 
-c10::intrusive_ptr<c10::ivalue::Future> ProcessGroupXCCL::WorkXCCL::
-    getFuture() {
-  return future_;
-}
-
 void ProcessGroupXCCL::WorkXCCL::synchronize() {
   auto currentStream = at::xpu::getCurrentXPUStream(device_.index());
   // Block the current stream on the XCCL stream
@@ -106,12 +132,6 @@ c10::intrusive_ptr<Backend> ProcessGroupXCCL::createProcessGroupXCCL(
     int size) {
   return c10::make_intrusive<ProcessGroupXCCL>(store, rank, size);
 }
-
-ProcessGroupXCCL::ProcessGroupXCCL(
-    const c10::intrusive_ptr<Store>& store,
-    int rank,
-    int size)
-    : Backend(rank, size), store_(store) {}
 
 ProcessGroupXCCL::~ProcessGroupXCCL() = default;
 
@@ -148,7 +168,7 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
 
   std::shared_ptr<xcclComm_t> XCCLComm;
 
-  XCCL_KVS kvs = get_kvs(rank_, store_);
+  XCCL_KVS kvs = get_kvs(rank_, *store_);
 
   int numRanks, rank;
   numRanks = getSize();
@@ -157,7 +177,7 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   ccl::vector_class<ccl::pair_class<int, ccl::device>> devs_rank;
   c10::impl::VirtualGuardImpl impl(device.type());
   c10::Stream stream = impl.getStream(device);
-  auto q = at::xpu::XPUStream(stream).queue();
+  sycl::queue& q = c10::xpu::XPUStream(stream).queue();
   auto ctx = ccl::create_context(q.get_context());
   devs_rank.emplace_back(rank, ccl::create_device(q.get_device()));
   XCCLComm = ccl::create_communicator(numRanks, devs_rank, ctx, kvs);
@@ -208,20 +228,20 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
 
   c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
 
-  work =initWork(device, rank_, op_type);
-  // work = make_work_ccl<WorkXCCL>(
-  //     inputs, outputs, fn, xcclComm_t, attr, rank_, op_type);
-  // work->events_.emplace_back(fn);
+  work = initWork(device, rank_, opType);
+
   work->outputs_ =
       std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
   c10::xpu::XPUCachingAllocator::recordStream(
       input.storage().data_ptr(), xcclStream);
   
-  auto ccl_stream = ccl::create_stream(at::xpu::XPUStream(xcclStream).queue());
+  auto ccl_stream = ccl::create_stream(xcclStream.queue());
   fn(input, output, attr, comm, ccl_stream);
 
   work->xcclEndEvent_->record(xcclStream);
-  c10::MultiStreamGuard streamGuard(xcclStream);
+
+  std::vector<c10::Stream> streams = {xcclStream.unwrap()};
+  c10::MultiStreamGuard streamGuard(streams);
   std::vector<at::Device> devices{device};
   work->future_ = c10::make_intrusive<at::ivalue::Future>(
       c10::ListType::create(c10::TensorType::get()), devices);
@@ -266,13 +286,12 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
           xcclComm_t comm,
           ccl::stream& stream) {
         ccl::event ret_evt;
-        ccl::datatype datatype = getXcclDataType(input.scalar_type());
         ret_evt = ccl::allreduce(
             input.data_ptr(),
             output.data_ptr(),
             (size_t)input.numel(),
             getXcclDataType(input.scalar_type()),
-            xcclOp.at(opts.reduceOp),
+            xcclOps.at(opts.reduceOp),
             comm,
             stream,
             attr);
