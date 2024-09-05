@@ -178,9 +178,16 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   c10::impl::VirtualGuardImpl impl(device.type());
   c10::Stream stream = impl.getStream(device);
   sycl::queue& q = c10::xpu::XPUStream(stream).queue();
-  auto ctx = ccl::create_context(q.get_context());
-  devs_rank.emplace_back(rank, ccl::create_device(q.get_device()));
-  XCCLComm = ccl::create_communicator(numRanks, devs_rank, ctx, kvs);
+  // const sycl::context& sycl_ctx = q.get_context();
+  // sycl::context sycl_ctx = q.get_context();
+  // ccl::generic_context_type<ccl::cl_backend_type::dpcpp_sycl_l0> ccl_ctx(sycl_ctx);
+  // auto ctx = ccl::create_context(ccl_ctx.get());
+
+  // auto ctx = ccl::create_context(q.get_context());
+  // devs_rank.emplace_back(rank, ccl::create_device(q.get_device()));
+  // XCCLComm = ccl::create_communicator(numRanks, devs_rank, ctx, kvs);
+  XCCLComm = std::make_shared<xcclComm_t>(ccl::create_communicator(numRanks, rank, kvs));
+
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -222,7 +229,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   const auto key = std::to_string(device.index());
   auto comm = getXCCLComm(key, device);
 
-  auto xcclStream = xcclStreams_.at(key);
+  auto stream = xcclStreams_.at(key);
   std::vector<at::Tensor> inputs{input};
   std::vector<at::Tensor> outputs{output};
 
@@ -233,14 +240,17 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   work->outputs_ =
       std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
   c10::xpu::XPUCachingAllocator::recordStream(
-      input.storage().data_ptr(), xcclStream);
+      input.storage().data_ptr(), stream);
   
-  auto ccl_stream = ccl::create_stream(xcclStream.queue());
-  fn(input, output, attr, comm, ccl_stream);
+  // auto ccl_stream = ccl::create_stream(stream.queue());
+  auto ccl_stream = ccl::create_stream();
 
-  work->xcclEndEvent_->record(xcclStream);
+  fn(input, output, attr, *comm, ccl_stream);
+  // fn(input, output, attr, comm, ccl_stream);
 
-  std::vector<c10::Stream> streams = {xcclStream.unwrap()};
+  work->xcclEndEvent_->record(stream);
+
+  std::vector<c10::Stream> streams = {stream.unwrap()};
   c10::MultiStreamGuard streamGuard(streams);
   std::vector<at::Device> devices{device};
   work->future_ = c10::make_intrusive<at::ivalue::Future>(
@@ -283,7 +293,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
       [&](at::Tensor& input,
           at::Tensor& output,
           ccl::allreduce_attr attr,
-          xcclComm_t comm,
+          xcclComm_t& comm,
           ccl::stream& stream) {
         ccl::event ret_evt;
         ret_evt = ccl::allreduce(

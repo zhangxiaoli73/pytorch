@@ -252,22 +252,24 @@ class Backend(str):
     NCCL = "nccl"
     UCC = "ucc"
     MPI = "mpi"
-    XCCL = "XCCL"
+    XCCL = "xccl"
 
     _BackendPlugin = namedtuple("_BackendPlugin", ["creator_fn", "extended_api"])
 
     _plugins: Dict[str, _BackendPlugin] = {}
 
-    backend_list = [UNDEFINED, GLOO, NCCL, UCC, MPI]
+    backend_list = [UNDEFINED, GLOO, NCCL, XCCL, UCC, MPI]
 
     default_device_backend_map: Dict[str, str] = {
         "cpu": GLOO,
         "cuda": NCCL,
+        "xpu": XCCL,
     }
 
     backend_capability: Dict[str, List[str]] = {
         GLOO: ["cpu", "cuda"],
         NCCL: ["cuda"],
+        XCCL: ["xpu"],
         UCC: ["cpu", "cuda"],
         MPI: ["cpu", "cuda"],
     }
@@ -276,6 +278,7 @@ class Backend(str):
         UNDEFINED: ProcessGroup.BackendType.UNDEFINED,
         GLOO: ProcessGroup.BackendType.GLOO,
         NCCL: ProcessGroup.BackendType.NCCL,
+        XCCL: ProcessGroup.BackendType.XCCL,
         UCC: ProcessGroup.BackendType.UCC,
     }
 
@@ -1363,6 +1366,10 @@ def _set_pg_timeout(timeout: timedelta, group: Optional[ProcessGroup] = None) ->
         if is_nccl_available() and isinstance(backend, ProcessGroupNCCL):
             backends.add(backend)  # type: ignore[arg-type]
         elif is_gloo_available() and isinstance(backend, ProcessGroupGloo):
+            backends.add(backend)  # type: ignore[arg-type]
+    if torch.device("xpu") in devices and is_xpu_available():
+        backend = group._get_backend(torch.device("xpu"))
+        if isinstance(backend, ProcessGroupXCCL):
             backends.add(backend)  # type: ignore[arg-type]
     if len(backends) == 0:
         warnings.warn("Set timeout is now only supported for either nccl or gloo.")
