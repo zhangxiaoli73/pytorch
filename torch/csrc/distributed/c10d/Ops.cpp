@@ -516,6 +516,7 @@ REGISTER_C10D_OP(alltoall_)
 REGISTER_C10D_OP(alltoall_base_)
 REGISTER_C10D_OP(barrier)
 
+REGISTER_C10D_OP1(allreduce_, XPU)
 // The following ops are specialized, register them separately
 
 TORCH_LIBRARY_IMPL(c10d, CPU, m) {

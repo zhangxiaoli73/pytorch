@@ -38,7 +38,7 @@ using XCCL_KVS = ccl::shared_ptr_class<ccl::kvs>;
 constexpr const char* XCCL_BACKEND_NAME = "xccl";
 // using namespace torch::xpu::xccl;
 
-class TORCH_XPU_API ProcessGroupXCCL : public Backend {
+class TORCH_API ProcessGroupXCCL : public Backend {
  public:
   class WorkXCCL : public Work {
    public:
