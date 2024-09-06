@@ -3,7 +3,7 @@
 #include <mutex>
 #include <sstream>
 
-// #ifdef USE_C10D_XCCL
+#ifdef USE_C10D_XCCL
 #include <exception>
 #include <map>
 #include <stdexcept>
@@ -174,20 +174,16 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   numRanks = getSize();
   rank = getRank();
 
-  ccl::vector_class<ccl::pair_class<int, ccl::device>> devs_rank;
   c10::impl::VirtualGuardImpl impl(device.type());
   c10::Stream stream = impl.getStream(device);
   sycl::queue& q = c10::xpu::XPUStream(stream).queue();
-  // const sycl::context& sycl_ctx = q.get_context();
-  // sycl::context sycl_ctx = q.get_context();
-  // ccl::generic_context_type<ccl::cl_backend_type::dpcpp_sycl_l0> ccl_ctx(sycl_ctx);
-  // auto ctx = ccl::create_context(ccl_ctx.get());
 
-  // auto ctx = ccl::create_context(q.get_context());
-  // devs_rank.emplace_back(rank, ccl::create_device(q.get_device()));
-  // XCCLComm = ccl::create_communicator(numRanks, devs_rank, ctx, kvs);
-  XCCLComm = std::make_shared<xcclComm_t>(ccl::create_communicator(numRanks, rank, kvs));
+  auto ctx = ccl::create_context(q.get_context());
+  ccl::vector_class<ccl::pair_class<int, ccl::device>> devs_rank;
+  devs_rank.emplace_back(rank, ccl::create_device(q.get_device()));
 
+  auto comms = ccl::create_communicators(numRanks, devs_rank, ctx, kvs);
+  XCCLComm = std::make_shared<xcclComm_t>(std::move(comms[0]));
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -242,11 +238,10 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   c10::xpu::XPUCachingAllocator::recordStream(
       input.storage().data_ptr(), stream);
   
-  // auto ccl_stream = ccl::create_stream(stream.queue());
-  auto ccl_stream = ccl::create_stream();
+  auto ccl_stream = ccl::create_stream(stream.queue());
+  // auto ccl_stream = ccl::create_stream();
 
   fn(input, output, attr, *comm, ccl_stream);
-  // fn(input, output, attr, comm, ccl_stream);
 
   work->xcclEndEvent_->record(stream);
 
@@ -312,4 +307,4 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
 
 } // namespace c10d
 
-// #endif // USE_C10D_XCCL
+#endif // USE_C10D_XCCL

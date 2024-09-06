@@ -7,12 +7,11 @@
 #include <unistd.h>
 #endif
 
-// #ifdef USE_C10D_XCCL
+#ifdef USE_C10D_XCCL
 #include <oneapi/ccl.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
 #include <torch/csrc/xpu/Event.h>
 #include <torch/csrc/xpu/Stream.h>
-// #include <torch/csrc/xpu/xccl.h>
 #include <exception>
 #include <memory>
 #include <vector>
@@ -36,7 +35,6 @@ namespace c10d {
 using xcclComm_t = ccl::communicator;
 using XCCL_KVS = ccl::shared_ptr_class<ccl::kvs>;
 constexpr const char* XCCL_BACKEND_NAME = "xccl";
-// using namespace torch::xpu::xccl;
 
 class TORCH_API ProcessGroupXCCL : public Backend {
  public:
@@ -47,30 +45,11 @@ class TORCH_API ProcessGroupXCCL : public Backend {
         int rank,
         OpType opType,
         const std::optional<std::vector<at::Tensor>>& inputs = std::nullopt);
-    // WorkXCCL(
-    //     std::vector<std::vector<at::Tensor>> outputTensors,
-    //     int rank = -1,
-    //     OpType opType = OpType::UNKNOWN,
-    //     const c10::optional<std::vector<at::Tensor>>& inputTensors =
-    //         c10::nullopt)
-    //     : Work(rank, opType), outputTensors_(std::move(outputTensors)) {}
     WorkXCCL(const WorkXCCL& w);
-    // ~WorkXCCL() override {
-    //   // Ensures all events are properly handled before destruction
-    //   for (auto& event : events_) {
-    //     event.wait();
-    //   }
-    // }
     ~WorkXCCL() override;
     bool isCompleted() override {
       TORCH_CHECK(
           false, "ProcessGroupXCCL::WorkXCCL::isCompleted not implemented");
-      // for (auto& event : events_) {
-      //   if (!event.test()) {
-      //     return false;
-      //   }
-      // }
-      // return true;
     }
 
     bool isSuccess() const override {
@@ -97,9 +76,6 @@ class TORCH_API ProcessGroupXCCL : public Backend {
    protected:
     at::Device device_;
     std::shared_ptr<at::xpu::XPUEvent> xcclEndEvent_;
-    // std::vector<ccl::event> events_;
-    // std::shared_ptr<xcclComm_t> xcclComm_;
-    // const std::vector<std::vector<at::Tensor>> outputTensors_;
    private:
     std::shared_ptr<std::vector<at::Tensor>> outputs_;
     c10::intrusive_ptr<at::ivalue::Future> future_;
@@ -110,7 +86,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       const c10::intrusive_ptr<Store>& store,
       int rank,
       int size)
-      : store_(store), Backend(rank, size) {}
+      : Backend(rank, size), store_(store) {}
 
   ~ProcessGroupXCCL() override;
 
@@ -168,4 +144,4 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
 } // namespace c10d
 
-// #endif // USE_C10D_XCCL
+#endif // USE_C10D_XCCL
