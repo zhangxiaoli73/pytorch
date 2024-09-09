@@ -1162,7 +1162,7 @@ if(USE_XCCL)
     caffe2_update_option(USE_XCCL OFF)
   else()
     include(${CMAKE_CURRENT_LIST_DIR}/External/xccl.cmake)
-    list(APPEND Caffe2_XPU_DEPENDENCY_LIBS __caffe2_xccl)
+    list(APPEND Caffe2_XPU_DEPENDENCY_LIBS torch::xccl)
   endif()
 endif()
 

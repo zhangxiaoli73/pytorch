@@ -163,11 +163,9 @@ endif()
 if(USE_XPU)
     include(${TORCH_ROOT}/cmake/public/xpu.cmake)
     append_filelist("libtorch_python_xpu_sources" TORCH_PYTHON_SRCS)
-
+    
     list(APPEND TORCH_PYTHON_COMPILE_DEFINITIONS USE_XPU)
-    # if(USE_XCCL)
     list(APPEND TORCH_PYTHON_LINK_LIBRARIES torch::xpurt)
-    # endif()
 endif()
 
 if(USE_CUDNN OR USE_ROCM)
@@ -286,7 +284,7 @@ if(USE_DISTRIBUTED)
       list(APPEND TORCH_PYTHON_LINK_LIBRARIES __caffe2_nccl)
     endif()
     if(USE_XCCL)
-      list(APPEND TORCH_PYTHON_LINK_LIBRARIES __caffe2_xccl)
+      list(APPEND TORCH_PYTHON_LINK_LIBRARIES torch::xccl)
     endif()
     # Same for MPI.
     if(USE_MPI)

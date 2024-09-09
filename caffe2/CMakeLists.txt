@@ -1014,9 +1014,14 @@ elseif(USE_CUDA)
 endif()
 
 if(USE_XPU)
+  if(USE_DISTRIBUTED)
+    append_filelist("libtorch_xpu_distributed_extra_sources" Caffe2_XPU_SRCS)
+    # message(FATAL_ERROR ${Caffe2_XPU_SRCS})
+  endif()
   add_library(torch_xpu ${Caffe2_XPU_SRCS})
   torch_compile_options(torch_xpu)  # see cmake/public/utils.cmake
   target_compile_definitions(torch_xpu PRIVATE USE_XPU)
+
   # ATen XPU implementation
   set(TORCH_XPU_OPS_DIR ${TORCH_ROOT}/third_party/torch-xpu-ops)
   set(TORCH_XPU_OPS_REPO_URL https://github.com/intel/torch-xpu-ops.git)
@@ -1064,10 +1069,6 @@ if(USE_XPU)
     message(WARNING "Failed to include ATen XPU implementation target")
   else()
     target_link_libraries(torch_xpu PRIVATE torch_xpu_ops)
-    if(USE_XCCL)
-      target_link_libraries(torch_xpu PRIVATE __caffe2_xccl)
-      target_compile_definitions(torch_xpu PRIVATE USE_XCCL)
-    endif()
     if(MSVC)
       # Windows
       target_link_libraries(torch_xpu PRIVATE
@@ -1081,6 +1082,10 @@ if(USE_XPU)
     # Set cached ${ATen_XPU_INCLUDE_DIRS} to torch
     include_directories(SYSTEM ${ATen_XPU_INCLUDE_DIRS})
 
+  endif()
+  if(USE_XCCL)
+    target_link_libraries(torch_xpu PRIVATE torch::xccl)
+    target_compile_definitions(torch_xpu PRIVATE USE_XCCL)
   endif()
 endif()
 
@@ -1369,12 +1374,6 @@ if(USE_DISTRIBUTED)
     endif()
   endif()
   if(USE_C10D_XCCL)
-    # if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    #   set_source_files_properties(
-    #     ${TORCH_SRC_DIR}/csrc/distributed/c10d/ProcessGroupXCCL.cpp
-    #     PROPERTIES COMPILE_DEFINITIONS  "CCL_ENABLE_SYCL")
-    #   target_sources(torch_xpu PRIVATE ${TORCH_SRC_DIR}/csrc/distributed/c10d/ProcessGroupXCCL.cpp)
-    # endif()
     target_compile_definitions(torch_xpu PUBLIC USE_C10D_XCCL)
     target_compile_definitions(torch_xpu PUBLIC CCL_ENABLE_SYCL)
   endif()

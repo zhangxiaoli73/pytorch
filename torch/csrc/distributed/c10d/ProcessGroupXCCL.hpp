@@ -10,8 +10,7 @@
 #ifdef USE_C10D_XCCL
 #include <oneapi/ccl.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
-#include <torch/csrc/xpu/Event.h>
-#include <torch/csrc/xpu/Stream.h>
+#include <ATen/xpu/XPUEvent.h>
 #include <exception>
 #include <memory>
 #include <vector>
