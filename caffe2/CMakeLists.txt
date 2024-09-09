@@ -1374,7 +1374,6 @@ if(USE_DISTRIBUTED)
   endif()
   if(USE_C10D_XCCL)
     target_compile_definitions(torch_xpu PUBLIC USE_C10D_XCCL)
-    # target_compile_definitions(torch_xpu PUBLIC CCL_ENABLE_SYCL)
     set_source_files_properties(
       ${TORCH_SRC_DIR}/csrc/distributed/c10d/ProcessGroupXCCL.cpp
       PROPERTIES COMPILE_DEFINITIONS  "CCL_ENABLE_SYCL")
