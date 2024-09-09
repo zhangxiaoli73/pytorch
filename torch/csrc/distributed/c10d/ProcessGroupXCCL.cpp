@@ -94,6 +94,39 @@ ccl::datatype getXcclDataType(at::ScalarType type) {
       type);
   return it->second;
 }
+
+ccl::reduction getXcclReduceOp(const ReduceOp& reduceOp, at::Tensor& input) {
+  try {
+    if (input.scalar_type() == at::kBool) {
+      if (reduceOp == ReduceOp::SUM) {
+        // For bool tensors, map sum to max, which both represent a bitwise or.
+        // This is to prevent overflow issues with sum, since we use uint8 to
+        // represent a bool (see xcclDatatypes mapping align with cuda).
+        return ccl::reduction::max;
+      }
+    }
+    return xcclOps.at(reduceOp);
+  } catch (const std::out_of_range&) {
+    switch (reduceOp) {
+      case ReduceOp::AVG:
+        C10_THROW_ERROR(ValueError, "Cannot use ReduceOp AVG with XCCL");
+        break;
+      case ReduceOp::BAND:
+        C10_THROW_ERROR(ValueError, "Cannot use ReduceOp.BAND with XCCL");
+        break;
+      case ReduceOp::BOR:
+        C10_THROW_ERROR(ValueError, "Cannot use ReduceOp.BOR with XCCL");
+        break;
+      case ReduceOp::BXOR:
+        C10_THROW_ERROR(ValueError, "Cannot use ReduceOp.BXOR with XCCL");
+        break;
+      default:
+        C10_THROW_ERROR(ValueError, "Unhandled ReduceOp");
+        break;
+    }
+  }
+}
+
 } // namespace
 
 static std::mutex xcclCommDevIdxMapMutex;
@@ -110,7 +143,8 @@ ProcessGroupXCCL::WorkXCCL::WorkXCCL(
 }
 
 ProcessGroupXCCL::WorkXCCL::WorkXCCL(const WorkXCCL& w)
-    : Work(w.rank_, w.opType_), device_(w.device_),
+    : Work(w.rank_, w.opType_),
+      device_(w.device_),
       xcclEndEvent_(w.xcclEndEvent_) {}
 
 ProcessGroupXCCL::WorkXCCL::~WorkXCCL() = default;
@@ -142,10 +176,7 @@ c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> ProcessGroupXCCL::initWork(
     const std::vector<at::Tensor>& inputs,
     const std::vector<at::Tensor>& outputs) {
   auto r = c10::make_intrusive<ProcessGroupXCCL::WorkXCCL>(
-      device,
-      rank,
-      opType,
-      std::optional<std::vector<at::Tensor>>(inputs));
+      device, rank, opType, std::optional<std::vector<at::Tensor>>(inputs));
   return r;
 }
 
@@ -237,9 +268,8 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
       std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
   c10::xpu::XPUCachingAllocator::recordStream(
       input.storage().data_ptr(), stream);
-  
+
   auto ccl_stream = ccl::create_stream(stream.queue());
-  // auto ccl_stream = ccl::create_stream();
 
   fn(input, output, attr, *comm, ccl_stream);
 
@@ -290,13 +320,15 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
           ccl::allreduce_attr attr,
           xcclComm_t& comm,
           ccl::stream& stream) {
+        auto xcclDataType = getXcclDataType(input.scalar_type());
+        auto xcclReduceOp = getXcclReduceOp(opts.reduceOp, input);
         ccl::event ret_evt;
         ret_evt = ccl::allreduce(
             input.data_ptr(),
             output.data_ptr(),
             (size_t)input.numel(),
-            getXcclDataType(input.scalar_type()),
-            xcclOps.at(opts.reduceOp),
+            xcclDataType,
+            xcclReduceOp,
             comm,
             stream,
             attr);
