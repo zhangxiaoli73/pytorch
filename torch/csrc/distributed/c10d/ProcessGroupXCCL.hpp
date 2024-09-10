@@ -65,6 +65,15 @@ using xcclComm_t = ccl::communicator;
 using XCCL_KVS = ccl::shared_ptr_class<ccl::kvs>;
 constexpr const char* XCCL_BACKEND_NAME = "xccl";
 
+namespace {
+struct AutoXcclGroup {
+  AutoXcclGroup();
+  AutoXcclGroup(xcclComm_t comm);
+  ~AutoXcclGroup() noexcept(false);
+  xcclComm_t comm_;
+};
+} // namespace
+
 class TORCH_API ProcessGroupXCCL : public Backend {
  public:
   class WorkXCCL : public Work {
@@ -169,6 +178,13 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       PostProcess post,
       OpType opType);
 
+  template <typename Fn>
+  c10::intrusive_ptr<Work> collectiveCoalesced(
+      std::vector<at::Tensor>& input,
+      std::vector<at::Tensor>& output,
+      Fn fn,
+      OpType opType);
+
   c10::intrusive_ptr<Work> allreduce(
       std::vector<at::Tensor>& tensors,
       const AllreduceOptions& opts = AllreduceOptions()) override;
@@ -176,9 +192,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   c10::intrusive_ptr<Work> allreduce_coalesced(
       std::vector<at::Tensor>& tensors,
       const AllreduceCoalescedOptions& opts =
-          AllreduceCoalescedOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::allreduce_coalesced not implemented");
-  }
+          AllreduceCoalescedOptions()) override;
 
   c10::intrusive_ptr<Work> reduce(
       std::vector<at::Tensor>& tensors,
@@ -281,6 +295,10 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     TORCH_CHECK(false, "ProcessGroupXCCL::recv not implemented");
   }
 
+  void groupStart();
+
+  void groupEnd();
+
   c10::intrusive_ptr<Work> gather(
       std::vector<std::vector<at::Tensor>>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
@@ -303,6 +321,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   c10::intrusive_ptr<Store> store_;
   std::mutex mutex_;
   bool blockingWait_ = false;
+  static thread_local uint64_t xcclActiveGroupCounter_;
 };
 } // namespace c10d
 
