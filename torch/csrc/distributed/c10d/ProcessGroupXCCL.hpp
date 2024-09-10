@@ -149,12 +149,6 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     TORCH_CHECK(false, "ProcessGroupXCCL::broadcast not implemented");
   }
 
-  c10::intrusive_ptr<Work> allreduce_sparse(
-      std::vector<at::Tensor>& tensors,
-      const AllreduceOptions& opts = AllreduceOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::allreduce_sparse not implemented");
-  }
-
   c10::intrusive_ptr<Work> allgather(
       std::vector<std::vector<at::Tensor>>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
