@@ -309,9 +309,6 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
       tensors.size() == 1, "Expecting one tensor only but got multiple");
   auto tensor = tensors.back();
   check_xpu_single_tensor(tensor);
-  if (opts.reduceOp == ReduceOp::AVG) {
-    TORCH_CHECK(false, "Cannot use ReduceOp AVG with XPU")
-  }
   return collective(
       tensor,
       tensor,
