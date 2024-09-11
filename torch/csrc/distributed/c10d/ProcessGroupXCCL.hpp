@@ -31,6 +31,10 @@
 #include <torch/csrc/distributed/c10d/Store.hpp>
 namespace c10d {
 
+static std::vector<std::string> TORCH_XCCL_BLOCKING_WAIT = {
+    "TORCH_XCCL_BLOCKING_WAIT",
+    "XCCL_BLOCKING_WAIT"};
+
 using xcclComm_t = ccl::communicator;
 using XCCL_KVS = ccl::shared_ptr_class<ccl::kvs>;
 constexpr const char* XCCL_BACKEND_NAME = "xccl";
@@ -46,10 +50,12 @@ class TORCH_API ProcessGroupXCCL : public Backend {
         const std::optional<std::vector<at::Tensor>>& inputs = std::nullopt);
     WorkXCCL(const WorkXCCL& w);
     ~WorkXCCL() override;
-    bool isCompleted() override {
-      TORCH_CHECK(
-          false, "ProcessGroupXCCL::WorkXCCL::isCompleted not implemented");
+
+    void addResult(ccl::event&& result) {
+      rets.push_back(std::move(result));
     }
+
+    bool isCompleted() override;
 
     bool isSuccess() const override {
       TORCH_CHECK(
@@ -62,6 +68,8 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
     void synchronize() override;
 
+    void synchronizeStream();
+
     bool wait(std::chrono::milliseconds timeout = kNoTimeout) override;
 
     c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
@@ -72,28 +80,37 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       TORCH_CHECK(false, "ProcessGroupXCCL::WorkXCCL::result not implemented");
     }
 
+    bool checkTimeout(
+        std::optional<std::chrono::milliseconds> timeout = std::nullopt);
+
    protected:
     at::Device device_;
     std::shared_ptr<at::xpu::XPUEvent> xcclEndEvent_;
+    bool blockingWait_ = false;
+    std::chrono::time_point<std::chrono::steady_clock> workStartTime_;
+    std::vector<ccl::event> rets;
 
    private:
+    void finishAWorkXCCLError(std::exception_ptr eptr) {
+      future_->setError(eptr);
+      finish(eptr);
+    }
+    void synchronizeInternal(std::chrono::milliseconds timeout);
     std::shared_ptr<std::vector<at::Tensor>> outputs_;
     c10::intrusive_ptr<at::ivalue::Future> future_;
     friend class ProcessGroupXCCL;
   };
 
-  explicit ProcessGroupXCCL(
+  ProcessGroupXCCL(const c10::intrusive_ptr<Store>& store, int rank, int size);
+
+  C10_DEPRECATED ProcessGroupXCCL(
       const c10::intrusive_ptr<Store>& store,
       int rank,
-      int size)
-      : Backend(rank, size), store_(store) {}
+      int size,
+      const std::string& groupName)
+      : ProcessGroupXCCL(store, rank, size) {}
 
   ~ProcessGroupXCCL() override;
-
-  static c10::intrusive_ptr<Backend> createProcessGroupXCCL(
-      const c10::intrusive_ptr<Store>& store,
-      int rank = -1,
-      int size = -1);
 
   const std::string getBackendName() const override {
     return std::string(XCCL_BACKEND_NAME);
@@ -252,13 +269,14 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     TORCH_CHECK(false, "ProcessGroupXCCL::scatter not implemented");
   }
 
- public:
+ protected:
   std::unordered_map<std::string, at::xpu::XPUStream> xcclStreams_;
   std::unordered_map<std::string, std::shared_ptr<xcclComm_t>>
       inInitializationCommMap_;
   std::unordered_map<std::string, std::shared_ptr<xcclComm_t>> devXCCLCommMap_;
   c10::intrusive_ptr<Store> store_;
   std::mutex mutex_;
+  bool blockingWait_ = false;
 };
 } // namespace c10d
 

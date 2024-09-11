@@ -131,13 +131,16 @@ ccl::reduction getXcclReduceOp(const ReduceOp& reduceOp, at::Tensor& input) {
 
 static std::mutex xcclCommDevIdxMapMutex;
 static std::unordered_map<std::shared_ptr<xcclComm_t>, int> xcclCommDevIdxMap;
+constexpr int64_t kSynchronizeBusyWaitMillis = 10;
 
 ProcessGroupXCCL::WorkXCCL::WorkXCCL(
     at::Device& device,
     int rank,
     OpType opType,
     const std::optional<std::vector<at::Tensor>>& inputs)
-    : Work(rank, opType, "profilingTitle", inputs), device_(device) {
+    : Work(rank, opType, "profilingTitle", inputs),
+      device_(device),
+      workStartTime_(std::chrono::steady_clock::now()) {
   unsigned char enable_timing = 0;
   xcclEndEvent_ = std::make_shared<at::xpu::XPUEvent>(enable_timing);
 }
@@ -145,26 +148,85 @@ ProcessGroupXCCL::WorkXCCL::WorkXCCL(
 ProcessGroupXCCL::WorkXCCL::WorkXCCL(const WorkXCCL& w)
     : Work(w.rank_, w.opType_),
       device_(w.device_),
+      blockingWait_(w.blockingWait_),
+      workStartTime_(w.workStartTime_),
       xcclEndEvent_(w.xcclEndEvent_) {}
 
 ProcessGroupXCCL::WorkXCCL::~WorkXCCL() = default;
 
-bool ProcessGroupXCCL::WorkXCCL::wait(std::chrono::milliseconds timeout) {
-  synchronize();
+bool ProcessGroupXCCL::WorkXCCL::checkTimeout(
+    std::optional<std::chrono::milliseconds> timeout) {
+  auto currentTimepoint = std::chrono::steady_clock::now();
+  auto timeElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      currentTimepoint - workStartTime_);
+  std::chrono::milliseconds opTimeout = std::chrono::milliseconds(60000);
+
+  auto workTimeout = timeout ? *timeout : opTimeout;
+
+  if (timeElapsed < workTimeout)
+    return false;
+  return true;
+}
+
+bool ProcessGroupXCCL::WorkXCCL::isCompleted() {
+  for (auto& ret : rets) {
+    bool flag;
+    try {
+      TORCH_CHECK(flag = ret.test());
+    } catch (...) {
+      finishAWorkXCCLError(std::current_exception());
+      return true;
+    }
+    if (!flag) {
+      return false;
+    }
+  }
   return true;
 }
 
 void ProcessGroupXCCL::WorkXCCL::synchronize() {
+  synchronizeInternal(kNoTimeout);
+}
+
+void ProcessGroupXCCL::WorkXCCL::synchronizeStream() {
   auto currentStream = at::xpu::getCurrentXPUStream(device_.index());
   // Block the current stream on the XCCL stream
   xcclEndEvent_->block(currentStream);
 }
 
-c10::intrusive_ptr<Backend> ProcessGroupXCCL::createProcessGroupXCCL(
+void ProcessGroupXCCL::WorkXCCL::synchronizeInternal(
+    std::chrono::milliseconds timeout) {
+  synchronizeStream();
+
+  if (blockingWait_) {
+    while (!isCompleted()) {
+      bool timedOut = checkTimeout(
+          timeout == kNoTimeout ? std::nullopt : std::make_optional(timeout));
+      if (timedOut) {
+        break;
+      }
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(kSynchronizeBusyWaitMillis));
+    }
+  }
+}
+
+bool ProcessGroupXCCL::WorkXCCL::wait(std::chrono::milliseconds timeout) {
+  synchronizeInternal(timeout);
+  for (auto& event : rets) {
+    event.wait();
+  }
+  rets.clear();
+  return true;
+}
+
+ProcessGroupXCCL::ProcessGroupXCCL(
     const c10::intrusive_ptr<Store>& store,
     int rank,
-    int size) {
-  return c10::make_intrusive<ProcessGroupXCCL>(store, rank, size);
+    int size)
+    : Backend(rank, size), store_(store) {
+  blockingWait_ = getCvarBool(TORCH_XCCL_BLOCKING_WAIT, false);
+  init();
 }
 
 ProcessGroupXCCL::~ProcessGroupXCCL() = default;
@@ -264,13 +326,14 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
 
   work = initWork(device, rank_, opType);
 
-  work->outputs_ = std::make_shared<std::vector<at::Tensor>>(outputs);
+  work->outputs_ =
+      std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
   c10::xpu::XPUCachingAllocator::recordStream(
       input.storage().data_ptr(), stream);
 
   auto ccl_stream = ccl::create_stream(stream.queue());
 
-  fn(input, output, attr, *comm, ccl_stream);
+  work->addResult(fn(input, output, attr, *comm, ccl_stream));
 
   work->xcclEndEvent_->record(stream);
 
@@ -280,6 +343,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   work->future_ = c10::make_intrusive<at::ivalue::Future>(
       c10::ListType::create(c10::TensorType::get()), devices);
   work->future_->markCompleted(at::IValue(*work->outputs_));
+  work->blockingWait_ = blockingWait_;
 
   return work;
 }
