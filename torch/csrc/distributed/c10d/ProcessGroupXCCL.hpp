@@ -202,9 +202,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
   c10::intrusive_ptr<Work> broadcast(
       std::vector<at::Tensor>& tensors,
-      const BroadcastOptions& opts = BroadcastOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::broadcast not implemented");
-  }
+      const BroadcastOptions& opts = BroadcastOptions()) override;
 
   c10::intrusive_ptr<Work> allgather(
       std::vector<std::vector<at::Tensor>>& outputTensors,

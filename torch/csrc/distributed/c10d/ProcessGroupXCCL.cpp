@@ -546,6 +546,42 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce_coalesced(
       OpType::COALESCED);
 }
 
+c10::intrusive_ptr<Work> ProcessGroupXCCL::broadcast(
+    std::vector<at::Tensor>& tensors,
+    const BroadcastOptions& opts) {
+  TORCH_CHECK(
+      tensors.size() == 1, "Expecting one tensor only but got multiple");
+  auto tensor = tensors.back();
+  if (tensor.is_complex()) {
+    tensor = at::view_as_real(tensor);
+  }
+  check_xpu_single_tensor(tensor);
+
+  const auto root = opts.rootRank + opts.rootTensor;
+
+  return collective(
+      tensor,
+      tensor,
+      [&](at::Tensor& input,
+          at::Tensor& output,
+          ccl::broadcast_attr attr,
+          xcclComm_t& comm,
+          ccl::stream& stream) {
+        auto xcclDataType = getXcclDataType(input.scalar_type());
+        ccl::event ret_evt;
+        ret_evt = ccl::broadcast(
+            input.data_ptr(),
+            (size_t)input.numel(),
+            xcclDataType,
+            root,
+            comm,
+            stream,
+            attr);
+        return ret_evt;
+      },
+      OpType::BROADCAST);
+}
+
 } // namespace c10d
 
 #endif // USE_C10D_XCCL
