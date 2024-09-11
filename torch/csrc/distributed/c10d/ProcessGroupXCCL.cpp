@@ -265,7 +265,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   work = initWork(device, rank_, opType);
 
   work->outputs_ =
-      std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
+      std::make_shared<std::vector<at::Tensor>>(outputs);
   c10::xpu::XPUCachingAllocator::recordStream(
       input.storage().data_ptr(), stream);
 
