@@ -33,11 +33,6 @@ AutoXcclGroup::AutoXcclGroup() {
   ccl::group_start();
 }
 
-AutoNcclGroup::AutoNcclGroup(xcclComm_t comm) {
-  comm_ = comm;
-  ccl::group_start();
-}
-
 AutoNcclGroup::~AutoNcclGroup() noexcept(false) {
   ccl::group_end();
 }

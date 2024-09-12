@@ -68,9 +68,7 @@ constexpr const char* XCCL_BACKEND_NAME = "xccl";
 namespace {
 struct AutoXcclGroup {
   AutoXcclGroup();
-  AutoXcclGroup(xcclComm_t comm);
   ~AutoXcclGroup() noexcept(false);
-  xcclComm_t comm_;
 };
 } // namespace
 
