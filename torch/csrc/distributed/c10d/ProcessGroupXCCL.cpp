@@ -457,14 +457,14 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
   work = initWork(device, rank_, opType);
 
   work->outputs_ = 
-      std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
+      std::make_shared<std::vector<at::Tensor>>(outputs);
   
   {
     AutoXcclGroup xccl_group_guard(comm);
     for (const auto i : c10::irange(inputs.size())) {
       c10::xpu::XPUCachingAllocator::recordStream(
           inputs[i].storage().data_ptr(), stream);
-      fn(inputs[i], outputs[i], attr, *comm, ccl_stream);
+      work->addResult(fn(inputs[i], outputs[i], attr, *comm, ccl_stream));
     }
   }
 
@@ -476,6 +476,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
   work->future_ = c10::make_intrusive<at::ivalue::Future>(
       c10::ListType::create(c10::TensorType::get()), devices);
   work->future_->markCompleted(at::IValue(*work->outputs_));
+  work->blockingWait_ = blockingWait_;
 
   return work;
 
