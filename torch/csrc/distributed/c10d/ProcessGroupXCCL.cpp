@@ -29,23 +29,10 @@ namespace {
 
 // wait nonblocking implement
 AutoXcclGroup::AutoXcclGroup() {
-<<<<<<< HEAD
-  ccl::group_start();
-}
-
-AutoXcclGroup::AutoXcclGroup(std::shared_ptr<xcclComm_t> comm) {
-  comm_ = std::move(comm);
   ccl::group_start();
 }
 
 AutoXcclGroup::~AutoXcclGroup() noexcept(false) {
-=======
-  comm_ = nullptr;
-  ccl::group_start();
-}
-
-AutoNcclGroup::~AutoNcclGroup() noexcept(false) {
->>>>>>> e85c26816e3dacf7244cc0d4f5abe1914f79fe66
   ccl::group_end();
 }
 
@@ -183,9 +170,6 @@ ccl::reduction getXcclReduceOp(const ReduceOp& reduceOp, at::Tensor& input) {
 static std::mutex xcclCommDevIdxMapMutex;
 static std::unordered_map<std::shared_ptr<xcclComm_t>, int> xcclCommDevIdxMap;
 constexpr int64_t kSynchronizeBusyWaitMillis = 10;
-
-// Before implementing send/recv, the xcclActiveGroupCounter_ variable has no effect.
-thread_local uint64_t ProcessGroupXCCL::xcclActiveGroupCounter_ = 0;
 
 // Before implementing send/recv, the xcclActiveGroupCounter_ variable has no
 // effect.
@@ -466,11 +450,10 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
 
   work = initWork(device, rank_, opType);
 
-  work->outputs_ = 
-      std::make_shared<std::vector<at::Tensor>>(outputs);
-  
+  work->outputs_ = std::make_shared<std::vector<at::Tensor>>(outputs);
+
   {
-    AutoXcclGroup xccl_group_guard(comm);
+    AutoXcclGroup xccl_group_guard;
     for (const auto i : c10::irange(inputs.size())) {
       c10::xpu::XPUCachingAllocator::recordStream(
           inputs[i].storage().data_ptr(), stream);
@@ -489,7 +472,6 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
   work->blockingWait_ = blockingWait_;
 
   return work;
-
 }
 
 c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
