@@ -160,17 +160,36 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       const std::vector<at::Tensor>& inputs = {},
       const std::vector<at::Tensor>& outputs = {});
 
-  template <typename Fn>
+  template <typename Fn, typename input_t, typename output_t>
   c10::intrusive_ptr<Work> collective(
-      at::Tensor& input,
-      at::Tensor& output,
+      input_t& input,
+      output_t& output,
       Fn fn,
       OpType opType);
 
-  template <typename Fn, typename PreProcess, typename PostProcess>
+  template <
+      typename Fn,
+      typename input_t,
+      typename output_t,
+      typename PreProcess,
+      typename PostProcess>
   c10::intrusive_ptr<Work> collective(
-      at::Tensor& input,
-      at::Tensor& output,
+      input_t& input,
+      output_t& output,
+      Fn fn,
+      PreProcess pre,
+      PostProcess post,
+      OpType opType);
+
+  template <
+      typename Fn,
+      typename input_t,
+      typename output_t,
+      typename PreProcess,
+      typename PostProcess>
+  c10::intrusive_ptr<Work> collective(
+      std::vector<input_t>& inputs,
+      std::vector<output_t>& outputs,
       Fn fn,
       PreProcess pre,
       PostProcess post,
@@ -205,16 +224,12 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   c10::intrusive_ptr<Work> allgather(
       std::vector<std::vector<at::Tensor>>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
-      const AllgatherOptions& opts = AllgatherOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::allgather not implemented");
-  }
+      const AllgatherOptions& opts = AllgatherOptions()) override;
 
   c10::intrusive_ptr<Work> _allgather_base(
       at::Tensor& outputbuffer,
       at::Tensor& inputbuffer,
-      const AllgatherOptions& opts = AllgatherOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::_allgather_base not implemented");
-  }
+      const AllgatherOptions& opts = AllgatherOptions()) override;
 
   c10::intrusive_ptr<Work> allgather_coalesced(
       std::vector<std::vector<at::Tensor>>& outputTensorLists,

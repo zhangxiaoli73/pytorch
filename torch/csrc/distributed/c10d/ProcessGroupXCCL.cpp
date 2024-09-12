@@ -10,6 +10,7 @@
 #include <tuple>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 
 #include <ATen/detail/FunctionTraits.h>
 #include <c10/core/DeviceType.h>
@@ -84,6 +85,15 @@ XCCL_KVS get_kvs(int rank, c10d::Store& store) {
   }
 
   return kvs;
+}
+
+bool check_same_size(const std::vector<at::Tensor>& input_tensors) {
+  for (const auto& input_tensor : input_tensors) {
+    if (!input_tensors[0].is_same_size(input_tensor)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void check_xpu_single_tensor(const at::Tensor& tensor) {
@@ -190,9 +200,9 @@ ProcessGroupXCCL::WorkXCCL::WorkXCCL(
 ProcessGroupXCCL::WorkXCCL::WorkXCCL(const WorkXCCL& w)
     : Work(w.rank_, w.opType_),
       device_(w.device_),
+      xcclEndEvent_(w.xcclEndEvent_),
       blockingWait_(w.blockingWait_),
-      workStartTime_(w.workStartTime_),
-      xcclEndEvent_(w.xcclEndEvent_) {}
+      workStartTime_(w.workStartTime_) {}
 
 ProcessGroupXCCL::WorkXCCL::~WorkXCCL() = default;
 
@@ -366,10 +376,17 @@ void ProcessGroupXCCL::groupEnd() {
   --xcclActiveGroupCounter_;
 }
 
-template <typename Fn, typename PreProcess, typename PostProcess>
+// align with good design single-device style, input_t and output_t due to
+// allgatherv need vector output
+template <
+    typename Fn,
+    typename input_t,
+    typename output_t,
+    typename PreProcess,
+    typename PostProcess>
 c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
-    at::Tensor& input,
-    at::Tensor& output,
+    std::vector<input_t>& inputs,
+    std::vector<output_t>& outputs,
     Fn fn,
     PreProcess pre,
     PostProcess post,
@@ -378,26 +395,50 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   using attr_t = typename traits::template arg<2>::type;
   attr_t attr = ccl::create_operation_attr<attr_t>();
 
-  auto device = input.device();
+  auto device = inputs[0].device();
   const auto key = std::to_string(device.index());
   auto comm = getXCCLComm(key, device);
 
   auto stream = xcclStreams_.at(key);
-  std::vector<at::Tensor> inputs{input};
-  std::vector<at::Tensor> outputs{output};
 
   c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
 
   work = initWork(device, rank_, opType);
 
-  work->outputs_ =
-      std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
-  c10::xpu::XPUCachingAllocator::recordStream(
-      input.storage().data_ptr(), stream);
+  { // Do we need to store the result of the operation?
+    std::variant<std::vector<at::Tensor>, std::vector<std::vector<at::Tensor>>>
+        outputs;
+    std::visit(
+        [&work](auto&& outputData) {
+          using T = std::decay_t<decltype(outputData)>;
 
-  auto ccl_stream = ccl::create_stream(stream.queue());
+          if constexpr (std::is_same_v<T, std::vector<at::Tensor>>) {
+            work->outputs_ = std::make_shared<std::vector<at::Tensor>>(
+                std::move(outputData));
+          } else if constexpr (std::is_same_v<
+                                   T,
+                                   std::vector<std::vector<at::Tensor>>>) {
+            std::vector<at::Tensor> flattened;
+            for (auto& vec : outputData) {
+              flattened.insert(flattened.end(), vec.begin(), vec.end());
+            }
+            work->outputs_ =
+                std::make_shared<std::vector<at::Tensor>>(std::move(flattened));
+          }
+        },
+        outputs);
+  }
 
-  work->addResult(fn(input, output, attr, *comm, ccl_stream));
+  pre(stream, work);
+
+  for (const auto& input : inputs) {
+    c10::xpu::XPUCachingAllocator::recordStream(
+        input.storage().data_ptr(), stream);
+  }
+
+  work->addResult(fn(inputs[0], outputs[0], attr, *comm, stream));
+
+  post(stream, work);
 
   work->xcclEndEvent_->record(stream);
 
@@ -412,20 +453,38 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   return work;
 }
 
-template <typename Fn>
+template <
+    typename Fn,
+    typename input_t,
+    typename output_t,
+    typename PreProcess,
+    typename PostProcess>
 c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
-    at::Tensor& input,
-    at::Tensor& output,
+    input_t& input,
+    output_t& output,
+    Fn fn,
+    PreProcess pre,
+    PostProcess post,
+    OpType opType) {
+  auto inputs = std::vector<input_t>{input};
+  auto outputs = std::vector<output_t>{output};
+  return collective(inputs, outputs, fn, pre, post, opType);
+}
+
+template <typename Fn, typename input_t, typename output_t>
+c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
+    input_t& input,
+    output_t& output,
     Fn fn,
     OpType opType) {
   return collective<Fn>(
       input,
       output,
       fn,
-      [](at::xpu::XPUStream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-      [](at::xpu::XPUStream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
+      },
+      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
+      },
       opType);
 }
 
@@ -444,7 +503,6 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
   auto comm = getXCCLComm(key, device);
 
   auto stream = xcclStreams_.at(key);
-  auto ccl_stream = ccl::create_stream(stream.queue());
 
   c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
 
@@ -457,7 +515,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
     for (const auto i : c10::irange(inputs.size())) {
       c10::xpu::XPUCachingAllocator::recordStream(
           inputs[i].storage().data_ptr(), stream);
-      work->addResult(fn(inputs[i], outputs[i], attr, *comm, ccl_stream));
+      work->addResult(fn(inputs[i], outputs[i], attr, *comm, stream));
     }
   }
 
@@ -488,7 +546,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
           at::Tensor& output,
           ccl::allreduce_attr attr,
           xcclComm_t& comm,
-          ccl::stream& stream) {
+          at::xpu::XPUStream& stream) {
         auto xcclDataType = getXcclDataType(input.scalar_type());
         auto xcclReduceOp = getXcclReduceOp(opts.reduceOp, input);
         ccl::event ret_evt;
@@ -499,7 +557,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
             xcclDataType,
             xcclReduceOp,
             comm,
-            stream,
+            ccl::create_stream(stream.queue()),
             attr);
         return ret_evt;
       },
@@ -521,7 +579,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce_coalesced(
           at::Tensor& output,
           ccl::allreduce_attr attr,
           xcclComm_t& comm,
-          ccl::stream& stream) {
+          at::xpu::XPUStream& stream) {
         auto xcclDataType = getXcclDataType(input.scalar_type());
         auto xcclReduceOp = getXcclReduceOp(opts.reduceOp, input);
         ccl::event ret_evt;
@@ -532,7 +590,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce_coalesced(
             xcclDataType,
             xcclReduceOp,
             comm,
-            stream,
+            ccl::create_stream(stream.queue()),
             attr);
         return ret_evt;
       },
@@ -559,7 +617,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::broadcast(
           at::Tensor& output,
           ccl::broadcast_attr attr,
           xcclComm_t& comm,
-          ccl::stream& stream) {
+          at::xpu::XPUStream& stream) {
         auto xcclDataType = getXcclDataType(input.scalar_type());
         ccl::event ret_evt;
         ret_evt = ccl::broadcast(
@@ -568,11 +626,154 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::broadcast(
             xcclDataType,
             root,
             comm,
-            stream,
+            ccl::create_stream(stream.queue()),
             attr);
         return ret_evt;
       },
       OpType::BROADCAST);
+}
+
+c10::intrusive_ptr<Work> ProcessGroupXCCL::allgather(
+    std::vector<std::vector<at::Tensor>>& outputTensors,
+    std::vector<at::Tensor>& inputTensors,
+    const AllgatherOptions& opts) {
+  TORCH_CHECK(
+      inputTensors.size() == 1, "Expecting one tensor only but got multiple");
+  // @lint-ignore CLANGTIDY
+  auto inputTensor = inputTensors.back();
+  check_xpu_single_tensor(inputTensor);
+  // @lint-ignore CLANGTIDY
+  std::vector<at::Tensor>& outputTensors_ = outputTensors.back();
+
+  bool same_size = check_same_size(outputTensors_);
+  if (same_size) {
+    // Flatten a vector of tensors into a single, stacked tensor.
+    at::Tensor outputFlattened = newLikeFlat(outputTensors_);
+
+    return collective(
+        inputTensor,
+        outputFlattened,
+        [&](at::Tensor& input,
+            at::Tensor& output,
+            ccl::allgather_attr attr,
+            xcclComm_t& comm,
+            at::xpu::XPUStream& stream) {
+          c10::xpu::XPUCachingAllocator::recordStream(
+              output.storage().data_ptr(), stream);
+          auto xcclDataType = getXcclDataType(input.scalar_type());
+          ccl::event ret_evt;
+
+          ret_evt = ccl::allgather(
+              input.data_ptr(),
+              output.data_ptr(),
+              (size_t)input.numel(),
+              xcclDataType,
+              comm,
+              ccl::create_stream(stream.queue()),
+              attr);
+          return ret_evt;
+        },
+        [](at::xpu::XPUStream&,
+           c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+        [&](at::xpu::XPUStream& Stream,
+            c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {
+          // Copy the flattened output tensors to the outputs.
+          c10::StreamGuard guard(Stream);
+          for (const auto j : c10::irange(outputTensors_.size())) {
+            c10::xpu::XPUCachingAllocator::recordStream(
+                outputTensors_[j].storage().data_ptr(), Stream);
+            outputTensors_[j].copy_(outputFlattened[j], true);
+          }
+        },
+        OpType::ALLGATHER);
+  } else {
+    // xccl implemented allgatherv, so broadcast_oop not needed
+    return collective(
+        inputTensor,
+        outputTensors_,
+        [=](at::Tensor& input,
+            const std::vector<at::Tensor>& outputs,
+            ccl::allgatherv_attr attr,
+            xcclComm_t& comm,
+            at::xpu::XPUStream& stream) {
+          ccl::event ret_evt;
+          auto xcclDataType = getXcclDataType(input.scalar_type());
+
+          std::vector<size_t> recvCounts(outputs.size(), 0);
+          std::transform(
+              outputs.begin(),
+              outputs.end(),
+              recvCounts.begin(),
+              [](const at::Tensor& t) { return t.numel(); });
+
+          TORCH_CHECK(
+              (size_t)input.numel() == recvCounts[rank_],
+              "allgather: send and recv count doesn't match");
+
+          std::vector<void*> recvBufs(outputs.size(), nullptr);
+          std::transform(
+              outputs.begin(),
+              outputs.end(),
+              recvBufs.begin(),
+              [](const at::Tensor& t) { return t.data_ptr(); });
+
+          ret_evt = ccl::allgatherv(
+              input.data_ptr(),
+              (size_t)input.numel(),
+              recvBufs,
+              recvCounts,
+              xcclDataType,
+              comm,
+              ccl::create_stream(stream.queue()),
+              attr);
+          return ret_evt;
+        },
+        c10d::OpType::ALLGATHER);
+  }
+}
+
+c10::intrusive_ptr<Work> ProcessGroupXCCL::_allgather_base(
+    at::Tensor& output_tensor,
+    at::Tensor& input_tensor,
+    const AllgatherOptions& opts) {
+  check_xpu_single_tensor(input_tensor);
+  check_xpu_single_tensor(output_tensor);
+
+  if (input_tensor.dtype() != output_tensor.dtype()) {
+    C10_THROW_ERROR(
+        TypeError, "output tensor must have the same type as input tensor");
+  }
+
+  if (input_tensor.numel() * size_ != output_tensor.numel()) {
+    C10_THROW_ERROR(
+        ValueError,
+        "output tensor size must be equal to world_size times input tensor size");
+  }
+
+  return collective(
+      input_tensor,
+      output_tensor,
+      [&](at::Tensor& input,
+          at::Tensor& output,
+          ccl::allgather_attr attr,
+          xcclComm_t& comm,
+          at::xpu::XPUStream& stream) {
+        c10::xpu::XPUCachingAllocator::recordStream(
+            output.storage().data_ptr(), stream);
+        auto xcclDataType = getXcclDataType(input.scalar_type());
+        ccl::event ret_evt;
+
+        ret_evt = ccl::allgather(
+            input.data_ptr(),
+            output.data_ptr(),
+            (size_t)input.numel(),
+            xcclDataType,
+            comm,
+            ccl::create_stream(stream.queue()),
+            attr);
+        return ret_evt;
+      },
+      OpType::_ALLGATHER_BASE);
 }
 
 } // namespace c10d
