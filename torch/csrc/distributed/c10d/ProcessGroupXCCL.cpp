@@ -227,6 +227,18 @@ ProcessGroupXCCL::ProcessGroupXCCL(
     : Backend(rank, size), store_(store) {
   blockingWait_ = getCvarBool(TORCH_XCCL_BLOCKING_WAIT, false);
   init();
+
+  {
+    int local_rank = getXCCLEnvVar("LOCAL_RANK");
+    int local_world_size = getXCCLEnvVar("LOCAL_WORLD_SIZE");
+    if (local_rank == -1 || local_world_size == -1) {
+      local_rank = rank;
+      local_world_size = size;
+    }
+    setXCCLEnvVar("CCL_PROCESS_LAUNCHER", "none");
+    setXCCLEnvVar("CCL_LOCAL_RANK", local_rank);
+    setXCCLEnvVar("CCL_LOCAL_SIZE", local_world_size);
+  }
 }
 
 ProcessGroupXCCL::~ProcessGroupXCCL() = default;
