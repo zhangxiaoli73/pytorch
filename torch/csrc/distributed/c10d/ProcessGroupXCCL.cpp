@@ -260,7 +260,7 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   if (deviceKey.empty()) {
     C10_THROW_ERROR(
         DistBackendError,
-        "Not able to create/get the CCL Communicator since "
+        "Not able to create/get the XCCL Communicator since "
         "the devices are empty ");
   }
 
