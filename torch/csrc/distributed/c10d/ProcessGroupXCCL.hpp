@@ -149,6 +149,12 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     return std::string(XCCL_BACKEND_NAME);
   }
 
+  void startCoalescing() override;
+
+  c10::intrusive_ptr<Work> endCoalescing() override;
+
+  c10::intrusive_ptr<Work> endCoalescing(OpType optype);
+
   std::shared_ptr<xcclComm_t> getXCCLComm(
       const std::string& deviceKey,
       at::Device& device);
@@ -221,6 +227,11 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       std::vector<at::Tensor>& tensors,
       const BroadcastOptions& opts = BroadcastOptions()) override;
 
+  c10::intrusive_ptr<Work> _reduce_oop(
+      at::Tensor& outputTensors,
+      at::Tensor& inputTensors,
+      const ReduceOptions& opts = ReduceOptions());
+
   c10::intrusive_ptr<Work> allgather(
       std::vector<std::vector<at::Tensor>>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
@@ -246,9 +257,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   c10::intrusive_ptr<Work> reduce_scatter(
       std::vector<at::Tensor>& outputTensors,
       std::vector<std::vector<at::Tensor>>& inputTensors,
-      const ReduceScatterOptions& opts = ReduceScatterOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::reduce_scatter not implemented");
-  }
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
   c10::intrusive_ptr<Work> _reduce_scatter_base(
       at::Tensor& outputTensor,
@@ -327,6 +336,9 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   std::unordered_map<std::string, std::shared_ptr<xcclComm_t>> devXCCLCommMap_;
   c10::intrusive_ptr<Store> store_;
   std::mutex mutex_;
+  int coalescing_state_ = 0;
+  at::Device coalescedDevice_ = at::Device("xpu");
+  std::shared_ptr<xcclComm_t> coalescedComm_ = nullptr;
   bool blockingWait_ = false;
   static thread_local uint64_t xcclActiveGroupCounter_;
 };
