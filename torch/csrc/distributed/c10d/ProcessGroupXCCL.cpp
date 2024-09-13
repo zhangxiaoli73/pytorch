@@ -36,7 +36,6 @@ std::map<c10d::ReduceOp, ccl::reduction> xcclOps = {
 std::map<at::ScalarType, ccl::datatype> xcclDatatypes = {
     {at::kByte, ccl::datatype::uint8},
     {at::kChar, ccl::datatype::int8},
-    {at::kShort, ccl::datatype::int16},
     {at::kInt, ccl::datatype::int32},
     {at::kLong, ccl::datatype::int64},
     {at::kHalf, ccl::datatype::float16},
@@ -148,9 +147,9 @@ ProcessGroupXCCL::WorkXCCL::WorkXCCL(
 ProcessGroupXCCL::WorkXCCL::WorkXCCL(const WorkXCCL& w)
     : Work(w.rank_, w.opType_),
       device_(w.device_),
+      xcclEndEvent_(w.xcclEndEvent_),
       blockingWait_(w.blockingWait_),
-      workStartTime_(w.workStartTime_),
-      xcclEndEvent_(w.xcclEndEvent_) {}
+      workStartTime_(w.workStartTime_) {}
 
 ProcessGroupXCCL::WorkXCCL::~WorkXCCL() = default;
 
@@ -174,7 +173,8 @@ bool ProcessGroupXCCL::WorkXCCL::isCompleted() {
     try {
       TORCH_CHECK(flag = ret.test());
     } catch (...) {
-      finishAWorkXCCLError(std::current_exception());
+      future_->setError(std::current_exception());
+      finish(std::current_exception());
       return true;
     }
     if (!flag) {

@@ -124,10 +124,6 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     std::vector<ccl::event> rets;
 
    private:
-    void finishAWorkXCCLError(std::exception_ptr eptr) {
-      future_->setError(eptr);
-      finish(eptr);
-    }
     void synchronizeInternal(std::chrono::milliseconds timeout);
     std::shared_ptr<std::vector<at::Tensor>> outputs_;
     c10::intrusive_ptr<at::ivalue::Future> future_;
