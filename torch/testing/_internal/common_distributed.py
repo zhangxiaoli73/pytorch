@@ -180,7 +180,8 @@ def skip_if_lt_x_gpu(x):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            if torch.cuda.is_available() and torch.cuda.device_count() >= x:
+            if (torch.cuda.is_available() and torch.cuda.device_count() >= x) or \
+               (torch.xpu.is_available() and torch.xpu.device_count() >= x):
                 return func(*args, **kwargs)
             sys.exit(TEST_SKIPS[f"multi-gpu-{x}"].exit_code)
 
@@ -469,7 +470,7 @@ def init_multigpu_helper(world_size: int, backend: str):
     On a single node, all visible GPUs are evenly
     divided to subsets, each process only uses a subset.
     """
-    nGPUs = torch.cuda.device_count()
+    nGPUs = torch.xpu.device_count() if torch.xpu.is_available() else torch.cuda.device_count()
     visible_devices = range(nGPUs)
 
     # If rank is less than or equal to number of available GPU's

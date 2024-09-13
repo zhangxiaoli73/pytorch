@@ -1672,10 +1672,10 @@ def _new_process_group_helper(
             "created, please use a different group name"
         )
 
-    if device_id is not None and (device_id.index is None or device_id.type != "cuda"):
+    if device_id is not None and (device_id.index is None or (device_id.type != "cuda" and device_id.type != "xpu")):
         raise ValueError(
             "init_process_group device_id parameter must be a cuda device with an "
-            "id, e.g. cuda:0, not just cuda or cpu"
+            "id, e.g. cuda:0, xpu, not just cuda or xpu or cpu"
         )
 
     # Note: _new_process_group_helper is only called from init_process_group, which always provides a timeout value
