@@ -62,6 +62,11 @@ bool with_mpirun() {
       ? true
       : false;
 }
+
+struct AutoXcclGroup {
+  AutoXcclGroup();
+  ~AutoXcclGroup() noexcept(false);
+};
 } // namespace
 
 static std::vector<std::string> TORCH_XCCL_BLOCKING_WAIT = {
@@ -71,13 +76,6 @@ static std::vector<std::string> TORCH_XCCL_BLOCKING_WAIT = {
 using xcclComm_t = ccl::communicator;
 using XCCL_KVS = ccl::shared_ptr_class<ccl::kvs>;
 constexpr const char* XCCL_BACKEND_NAME = "xccl";
-
-namespace {
-struct AutoXcclGroup {
-  AutoXcclGroup();
-  ~AutoXcclGroup() noexcept(false);
-};
-} // namespace
 
 class TORCH_API ProcessGroupXCCL : public Backend {
  public:
