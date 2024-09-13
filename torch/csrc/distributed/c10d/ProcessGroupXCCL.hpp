@@ -55,6 +55,13 @@ void setXCCLEnvVar(std::string envVarName, int val) {
 void setXCCLEnvVar(std::string envVarName, std::string val) {
   setenv(envVarName.c_str(), val.c_str(), 1);
 }
+
+bool with_mpirun() {
+  return (getenv("MPI_LOCALRANKID") || getenv("MPI_LOCALNRANKS") ||
+          getenv("PMI_RANK") || getenv("PMI_SIZE") || getenv("PMIX_RANK"))
+      ? true
+      : false;
+}
 } // namespace
 
 static std::vector<std::string> TORCH_XCCL_BLOCKING_WAIT = {

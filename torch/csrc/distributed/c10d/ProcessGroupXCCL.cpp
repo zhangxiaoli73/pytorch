@@ -228,7 +228,7 @@ ProcessGroupXCCL::ProcessGroupXCCL(
   blockingWait_ = getCvarBool(TORCH_XCCL_BLOCKING_WAIT, false);
   init();
 
-  {
+  if (!with_mpirun()) {
     int local_rank = getXCCLEnvVar("LOCAL_RANK");
     int local_world_size = getXCCLEnvVar("LOCAL_WORLD_SIZE");
     if (local_rank == -1 || local_world_size == -1) {
