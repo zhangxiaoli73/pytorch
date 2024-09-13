@@ -55,6 +55,13 @@ void setXCCLEnvVar(std::string envVarName, int val) {
 void setXCCLEnvVar(std::string envVarName, std::string val) {
   setenv(envVarName.c_str(), val.c_str(), 1);
 }
+
+bool with_mpirun() {
+  return (getenv("MPI_LOCALRANKID") || getenv("MPI_LOCALNRANKS") ||
+          getenv("PMI_RANK") || getenv("PMI_SIZE") || getenv("PMIX_RANK"))
+      ? true
+      : false;
+}
 } // namespace
 
 static std::vector<std::string> TORCH_XCCL_BLOCKING_WAIT = {
@@ -87,6 +94,8 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     void addResult(ccl::event&& result) {
       rets.push_back(std::move(result));
     }
+
+    void finishWorkXcclError(const std::exception_ptr& eptr);
 
     bool isCompleted() override;
 
@@ -124,10 +133,6 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     std::vector<ccl::event> rets;
 
    private:
-    void finishAWorkXCCLError(std::exception_ptr eptr) {
-      future_->setError(eptr);
-      finish(eptr);
-    }
     void synchronizeInternal(std::chrono::milliseconds timeout);
     std::shared_ptr<std::vector<at::Tensor>> outputs_;
     c10::intrusive_ptr<at::ivalue::Future> future_;

@@ -47,7 +47,6 @@ std::map<c10d::ReduceOp, ccl::reduction> xcclOps = {
 std::map<at::ScalarType, ccl::datatype> xcclDatatypes = {
     {at::kByte, ccl::datatype::uint8},
     {at::kChar, ccl::datatype::int8},
-    {at::kShort, ccl::datatype::int16},
     {at::kInt, ccl::datatype::int32},
     {at::kLong, ccl::datatype::int64},
     {at::kHalf, ccl::datatype::float16},
@@ -220,13 +219,19 @@ bool ProcessGroupXCCL::WorkXCCL::checkTimeout(
   return true;
 }
 
+void ProcessGroupXCCL::WorkXCCL::finishWorkXcclError(
+    const std::exception_ptr& eptr) {
+  future_->setError(eptr);
+  finish(eptr);
+}
+
 bool ProcessGroupXCCL::WorkXCCL::isCompleted() {
   for (auto& ret : rets) {
     bool flag;
     try {
       TORCH_CHECK(flag = ret.test());
     } catch (...) {
-      finishAWorkXCCLError(std::current_exception());
+      finishWorkXcclError(std::current_exception());
       return true;
     }
     if (!flag) {
@@ -287,7 +292,7 @@ ProcessGroupXCCL::ProcessGroupXCCL(
   blockingWait_ = getCvarBool(TORCH_XCCL_BLOCKING_WAIT, false);
   init();
 
-  {
+  if (!with_mpirun()) {
     int local_rank = getXCCLEnvVar("LOCAL_RANK");
     int local_world_size = getXCCLEnvVar("LOCAL_WORLD_SIZE");
     if (local_rank == -1 || local_world_size == -1) {
