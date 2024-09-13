@@ -88,6 +88,8 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       rets.push_back(std::move(result));
     }
 
+    void finishWorkXcclError(const std::exception_ptr& eptr);
+
     bool isCompleted() override;
 
     bool isSuccess() const override {

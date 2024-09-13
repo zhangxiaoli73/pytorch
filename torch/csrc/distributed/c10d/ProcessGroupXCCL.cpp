@@ -167,14 +167,19 @@ bool ProcessGroupXCCL::WorkXCCL::checkTimeout(
   return true;
 }
 
+void ProcessGroupXCCL::WorkXCCL::finishWorkXcclError(
+    const std::exception_ptr& eptr) {
+  future_->setError(eptr);
+  finish(eptr);
+}
+
 bool ProcessGroupXCCL::WorkXCCL::isCompleted() {
   for (auto& ret : rets) {
     bool flag;
     try {
       TORCH_CHECK(flag = ret.test());
     } catch (...) {
-      future_->setError(std::current_exception());
-      finish(std::current_exception());
+      finishWorkXcclError(std::current_exception());
       return true;
     }
     if (!flag) {
