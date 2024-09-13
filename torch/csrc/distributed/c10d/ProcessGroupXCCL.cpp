@@ -762,7 +762,6 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_allgather_base(
             output.storage().data_ptr(), stream);
         auto xcclDataType = getXcclDataType(input.scalar_type());
         ccl::event ret_evt;
-
         ret_evt = ccl::allgather(
             input.data_ptr(),
             output.data_ptr(),
@@ -774,6 +773,33 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_allgather_base(
         return ret_evt;
       },
       OpType::_ALLGATHER_BASE);
+}
+
+c10::intrusive_ptr<Work> ProcessGroupXCCL::allgather_into_tensor_coalesced(
+    std::vector<at::Tensor>& outputs,
+    std::vector<at::Tensor>& inputs,
+    const AllgatherOptions& opts) {
+  return collectiveCoalesced(
+      inputs,
+      outputs,
+      [&](at::Tensor& input,
+          at::Tensor& output,
+          ccl::allgather_attr attr,
+          xcclComm_t& comm,
+          at::xpu::XPUStream& stream) {
+        auto xcclDataType = getXcclDataType(input.scalar_type());
+        ccl::event ret_evt;
+        ret_evt = ccl::allgather(
+            input.data_ptr(),
+            output.data_ptr(),
+            (size_t)input.numel(),
+            xcclDataType,
+            comm,
+            ccl::create_stream(stream.queue()),
+            attr);
+        return ret_evt;
+      },
+      OpType::COALESCED);
 }
 
 } // namespace c10d

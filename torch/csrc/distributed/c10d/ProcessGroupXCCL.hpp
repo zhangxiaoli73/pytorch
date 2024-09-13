@@ -241,11 +241,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   c10::intrusive_ptr<Work> allgather_into_tensor_coalesced(
       std::vector<at::Tensor>& outputs,
       std::vector<at::Tensor>& inputs,
-      const AllgatherOptions& opts = AllgatherOptions()) override {
-    TORCH_CHECK(
-        false,
-        "ProcessGroupXCCL::allgather_into_tensor_coalesced not implemented");
-  }
+      const AllgatherOptions& opts = AllgatherOptions()) override;
 
   c10::intrusive_ptr<Work> reduce_scatter(
       std::vector<at::Tensor>& outputTensors,
