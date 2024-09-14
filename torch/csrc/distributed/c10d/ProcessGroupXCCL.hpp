@@ -117,7 +117,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     }
 
     std::vector<at::Tensor> result() override {
-      TORCH_CHECK(false, "ProcessGroupXCCL::WorkXCCL::result not implemented");
+      return *outputs_;
     }
 
     bool checkTimeout(
@@ -265,10 +265,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   c10::intrusive_ptr<Work> _reduce_scatter_base(
       at::Tensor& outputTensor,
       at::Tensor& inputTensor,
-      const ReduceScatterOptions& opts = ReduceScatterOptions()) override {
-    TORCH_CHECK(
-        false, "ProcessGroupXCCL::_reduce_scatter_base not implemented");
-  }
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
   c10::intrusive_ptr<Work> reduce_scatter_tensor_coalesced(
       std::vector<at::Tensor>& outputs,
