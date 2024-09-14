@@ -594,7 +594,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
     for (const auto i : c10::irange(inputs.size())) {
       c10::xpu::XPUCachingAllocator::recordStream(
           inputs[i].storage().data_ptr(), stream);
-      work->addResult(fn(inputs[i], outputs[i], attr, *comm, stream));
+      fn(inputs[i], outputs[i], attr, *comm, stream);
     }
   }
 
