@@ -936,7 +936,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::reduce_scatter(
   auto inputTensors_ = inputTensors.back();
   TORCH_CHECK(
       !isFloat8Type(outputTensor.scalar_type()),
-      "Float8 dtypes are not currenlty supported for NCCL reductions");
+      "Float8 dtypes are not currenlty supported for XCCL reductions");
 
   bool same_size = check_same_size(inputTensors_);
   if (same_size) {
@@ -1015,7 +1015,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_reduce_scatter_base(
   const auto& tensor = outputTensor;
   TORCH_CHECK(
       !isFloat8Type(tensor.scalar_type()),
-      "Float8 dtypes are not currenlty supported for NCCL reductions");
+      "Float8 dtypes are not currenlty supported for XCCL reductions");
 
   return collective(
       inputTensor,
@@ -1041,6 +1041,39 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_reduce_scatter_base(
         return ret_evt;
       },
       OpType::_REDUCE_SCATTER_BASE);
+}
+
+c10::intrusive_ptr<Work> ProcessGroupXCCL::reduce_scatter_tensor_coalesced(
+    std::vector<at::Tensor>& outputs,
+    std::vector<at::Tensor>& inputs,
+    const ReduceScatterOptions& opts) {
+  TORCH_CHECK(
+      !isFloat8Type(inputs.back().scalar_type()),
+      "Float8 dtypes are not currenlty supported for XCCL reductions");
+  return collectiveCoalesced(
+      inputs,
+      outputs,
+      [&](at::Tensor& input,
+          at::Tensor& output,
+          ccl::reduce_attr attr,
+          xcclComm_t& comm,
+          at::xpu::XPUStream& stream) {
+        c10::xpu::XPUCachingAllocator::recordStream(
+            output.storage().data_ptr(), stream);
+        auto xcclDataType = getXcclDataType(input.scalar_type());
+        auto xcclReduceOp = getXcclReduceOp(opts.reduceOp, input);
+        ccl::event ret_evt;
+        ret_evt = ccl::reduce_scatter(
+            input.data_ptr(),
+            output.data_ptr(),
+            (size_t)output.numel(),
+            xcclDataType,
+            xcclReduceOp,
+            comm,
+            ccl::create_stream(stream.queue()));
+        return ret_evt;
+      },
+      OpType::COALESCED);
 }
 
 } // namespace c10d

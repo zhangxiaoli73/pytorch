@@ -270,11 +270,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   c10::intrusive_ptr<Work> reduce_scatter_tensor_coalesced(
       std::vector<at::Tensor>& outputs,
       std::vector<at::Tensor>& inputs,
-      const ReduceScatterOptions& opts = ReduceScatterOptions()) override {
-    TORCH_CHECK(
-        false,
-        "ProcessGroupXCCL::reduce_scatter_tensor_coalesced not implemented");
-  }
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
   c10::intrusive_ptr<Work> barrier(
       const BarrierOptions& opts = BarrierOptions()) override {
