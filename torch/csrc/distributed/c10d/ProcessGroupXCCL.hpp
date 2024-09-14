@@ -126,6 +126,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
    protected:
     at::Device device_;
     std::shared_ptr<at::xpu::XPUEvent> xcclEndEvent_;
+    at::Tensor barrierTensor_;
     bool blockingWait_ = false;
     std::chrono::time_point<std::chrono::steady_clock> workStartTime_;
     std::vector<ccl::event> rets;
@@ -211,6 +212,10 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       Fn fn,
       OpType opType);
 
+  c10::intrusive_ptr<Work> allreduce_impl(
+      at::Tensor& tensor,
+      const AllreduceOptions& opts = AllreduceOptions());
+
   c10::intrusive_ptr<Work> allreduce(
       std::vector<at::Tensor>& tensors,
       const AllreduceOptions& opts = AllreduceOptions()) override;
@@ -273,9 +278,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
   c10::intrusive_ptr<Work> barrier(
-      const BarrierOptions& opts = BarrierOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::barrier not implemented");
-  }
+      const BarrierOptions& opts = BarrierOptions()) override;
 
   c10::intrusive_ptr<Work> alltoall_base(
       at::Tensor& outputTensor,
@@ -332,6 +335,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   std::unordered_map<std::string, std::shared_ptr<xcclComm_t>> devXCCLCommMap_;
   c10::intrusive_ptr<Store> store_;
   std::mutex mutex_;
+  std::set<int> usedDeviceIdxs_;
   int coalescing_state_ = 0;
   at::Device coalescedDevice_ = at::Device("xpu");
   std::shared_ptr<xcclComm_t> coalescedComm_ = nullptr;

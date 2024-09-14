@@ -271,6 +271,10 @@ void ProcessGroupXCCL::WorkXCCL::synchronizeInternal(
           std::chrono::milliseconds(kSynchronizeBusyWaitMillis));
     }
   }
+  if (barrierTensor_.defined()) {
+    auto currentStream = at::xpu::getCurrentXPUStream(device_.index());
+    currentStream.synchronize();
+  }
 }
 
 bool ProcessGroupXCCL::WorkXCCL::wait(std::chrono::milliseconds timeout) {
@@ -332,6 +336,8 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
         "Not able to create/get the XCCL Communicator since "
         "the devices are empty ");
   }
+
+  usedDeviceIdxs_.insert(device.index());
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -622,12 +628,9 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
   return work;
 }
 
-c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
-    std::vector<at::Tensor>& tensors,
+c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce_impl(
+    at::Tensor& tensor,
     const AllreduceOptions& opts) {
-  TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
-  auto tensor = tensors.back();
-  check_xpu_single_tensor(tensor);
   return collective(
       tensor,
       tensor,
@@ -651,6 +654,19 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
         return ret_evt;
       },
       OpType::ALLREDUCE);
+}
+
+c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
+    std::vector<at::Tensor>& tensors,
+    const AllreduceOptions& opts) {
+  TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
+  auto tensor = tensors.back();
+  check_xpu_single_tensor(tensor);
+  TORCH_CHECK(
+      !isFloat8Type(tensor.scalar_type()),
+      "Float8 dtypes are not currenlty supported for XCCL reductions");
+
+  return allreduce_impl(tensor, opts);
 }
 
 c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce_coalesced(
@@ -1074,6 +1090,39 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::reduce_scatter_tensor_coalesced(
         return ret_evt;
       },
       OpType::COALESCED);
+}
+
+c10::intrusive_ptr<Work> ProcessGroupXCCL::barrier(const BarrierOptions& opts) {
+  // Device to use for barrier
+  int barDevIdx = -1;
+
+  // See nccl barrier comments
+  if (!opts.device_ids.empty()) {
+    barDevIdx = opts.device_ids[0];
+  } else if (getBoundDeviceId()) {
+    barDevIdx = (*getBoundDeviceId()).index();
+  } else if (!usedDeviceIdxs_.empty()) {
+    barDevIdx = *usedDeviceIdxs_.begin();
+  } else {
+    barDevIdx =
+        static_cast<int16_t>(rank_ % at::detail::getXPUHooks().getNumGPUs());
+  }
+
+  TORCH_CHECK_WITH(
+      ValueError,
+      barDevIdx >= 0,
+      "Failed to infer a GPU device id to perform barrier. ");
+  auto barDevice = at::Device(at::DeviceType::XPU, barDevIdx);
+
+  at::Tensor barrierTensor =
+      at::zeros({1}, at::TensorOptions().device(barDevice).dtype(at::kFloat));
+
+  auto work = allreduce_impl(barrierTensor);
+
+  auto xcclWork = dynamic_cast<ProcessGroupXCCL::WorkXCCL*>(work.get());
+  TORCH_CHECK(xcclWork);
+  xcclWork->barrierTensor_ = std::move(barrierTensor);
+  return work;
 }
 
 } // namespace c10d
