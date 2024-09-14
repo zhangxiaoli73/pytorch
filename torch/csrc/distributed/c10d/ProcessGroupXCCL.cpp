@@ -464,7 +464,6 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   }
 
   auto stream = xcclStreams_.at(key);
-  std::vector<at::Tensor> outputs{output};
 
   c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
 
