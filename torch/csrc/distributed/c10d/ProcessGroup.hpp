@@ -590,6 +590,11 @@ class TORCH_API ProcessGroup : public torch::CustomClassHolder {
       tensor = at::empty(
           {1},
           at::TensorOptions().device(at::DeviceType::CUDA).dtype(at::kByte));
+    } else if (backendType_ == c10d::ProcessGroup::BackendType::XCCL) {
+      // set xpu tensor for override cpu dispatch
+      tensor = at::empty(
+          {1},
+          at::TensorOptions().device(at::DeviceType::XPU).dtype(at::kByte));
     } else {
       // Default to using cpu implementation
       tensor = at::empty(
