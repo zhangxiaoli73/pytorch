@@ -319,8 +319,6 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   auto comm = getXCCLComm(key, device);
 
   auto stream = xcclStreams_.at(key);
-  std::vector<at::Tensor> inputs{input};
-  std::vector<at::Tensor> outputs{output};
 
   c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
 
