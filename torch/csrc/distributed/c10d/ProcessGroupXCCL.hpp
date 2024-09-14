@@ -89,12 +89,6 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     WorkXCCL(const WorkXCCL& w);
     ~WorkXCCL() override;
 
-    void addResult(ccl::event&& result) {
-      rets.push_back(std::move(result));
-    }
-
-    void finishWorkXcclError(const std::exception_ptr& eptr);
-
     bool isCompleted() override;
 
     bool isSuccess() const override {
@@ -129,7 +123,6 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     at::Tensor barrierTensor_;
     bool blockingWait_ = false;
     std::chrono::time_point<std::chrono::steady_clock> workStartTime_;
-    std::vector<ccl::event> rets;
 
    private:
     void synchronizeInternal(std::chrono::milliseconds timeout);

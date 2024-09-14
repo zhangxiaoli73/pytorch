@@ -224,26 +224,11 @@ bool ProcessGroupXCCL::WorkXCCL::checkTimeout(
   return true;
 }
 
-void ProcessGroupXCCL::WorkXCCL::finishWorkXcclError(
-    const std::exception_ptr& eptr) {
-  future_->setError(eptr);
-  finish(eptr);
-}
-
 bool ProcessGroupXCCL::WorkXCCL::isCompleted() {
-  for (auto& ret : rets) {
-    bool flag;
-    try {
-      TORCH_CHECK(flag = ret.test());
-    } catch (...) {
-      finishWorkXcclError(std::current_exception());
-      return true;
-    }
-    if (!flag) {
-      return false;
-    }
+  if (xcclEndEvent_ && xcclEndEvent_->query()) {
+    return true;
   }
-  return true;
+  return false;
 }
 
 void ProcessGroupXCCL::WorkXCCL::synchronize() {
@@ -279,10 +264,6 @@ void ProcessGroupXCCL::WorkXCCL::synchronizeInternal(
 
 bool ProcessGroupXCCL::WorkXCCL::wait(std::chrono::milliseconds timeout) {
   synchronizeInternal(timeout);
-  for (auto& event : rets) {
-    event.wait();
-  }
-  rets.clear();
   return true;
 }
 
@@ -301,6 +282,8 @@ ProcessGroupXCCL::ProcessGroupXCCL(
   blockingWait_ = getCvarBool(TORCH_XCCL_BLOCKING_WAIT, false);
   init();
 
+  // Intel oneCCL requires passing CCL_LOCAL_RANK and CCL_LOCAL_SIZE for non-MPI
+  // launchers.
   if (!with_mpirun()) {
     int local_rank = getXCCLEnvVar("LOCAL_RANK");
     int local_world_size = getXCCLEnvVar("LOCAL_WORLD_SIZE");
@@ -481,6 +464,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   }
 
   auto stream = xcclStreams_.at(key);
+  std::vector<at::Tensor> outputs{output};
 
   c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
 
@@ -517,7 +501,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
         input.storage().data_ptr(), stream);
   }
 
-  work->addResult(fn(inputs[0], outputs[0], attr, *comm, stream));
+  fn(inputs[0], outputs[0], attr, *comm, stream);
 
   post(stream, work);
 
