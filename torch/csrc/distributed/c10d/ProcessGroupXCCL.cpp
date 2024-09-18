@@ -100,12 +100,23 @@ bool check_same_size(const std::vector<at::Tensor>& input_tensors) {
   return true;
 }
 
-void check_xpu_single_tensor(const at::Tensor& tensor) {
+void check_xpu_single_tensor(
+    const at::Tensor& tensor,
+    const bool p2p = false // whether operation is a P2P operation
+) {
   if (!tensor.is_xpu() || tensor.is_sparse()) {
     C10_THROW_ERROR(ValueError, "Tensors must be XPU and dense");
   }
+  // Skip the following requirements for P2P operations
   if (!tensor.is_contiguous(tensor.suggest_memory_format())) {
-    C10_THROW_ERROR(ValueError, "Tensors must be contiguous");
+    if (p2p) {
+      TORCH_WARN_ONCE(
+          "Detected non-contiguous tensor in P2P operations. It is user "
+          "responsibility to guarantee that source and destination tensors have "
+          "the same contiguity format.");
+    } else {
+      C10_THROW_ERROR(ValueError, "Tensors must be contiguous");
+    }
   }
 }
 
@@ -1106,6 +1117,93 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::barrier(const BarrierOptions& opts) {
   TORCH_CHECK(xcclWork);
   xcclWork->barrierTensor_ = std::move(barrierTensor);
   return work;
+}
+
+c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall_base(
+    at::Tensor& outputTensor,
+    at::Tensor& inputTensor,
+    std::vector<int64_t>& outputSplitSizes,
+    std::vector<int64_t>& inputSplitSizes,
+    const AllToAllOptions& /* unused */) {
+  check_xpu_single_tensor(outputTensor, true);
+  check_xpu_single_tensor(inputTensor, true);
+  if (outputSplitSizes.size() == 0 && inputSplitSizes.size() == 0) {
+    TORCH_CHECK(
+        outputTensor.numel() == inputTensor.numel() &&
+            outputTensor.scalar_type() == inputTensor.scalar_type(),
+        "xpu_alltoall_base: tensors are not equal in size or data type");
+    TORCH_CHECK(
+        outputTensor.size(0) % size_ == 0,
+        "xpu_alltoall_base: tensor's dim 0 does not divide equally across group size");
+    return collective(
+        inputTensor,
+        outputTensor,
+        [&](at::Tensor& input,
+            at::Tensor& output,
+            ccl::alltoall_attr attr,
+            xcclComm_t& comm,
+            at::xpu::XPUStream& stream) {
+          c10::xpu::XPUCachingAllocator::recordStream(
+              output.storage().data_ptr(), stream);
+          auto xcclDataType = getXcclDataType(output.scalar_type());
+          ccl::event ret_evt;
+          ret_evt = ccl::alltoall(
+              input.data_ptr(),
+              output.data_ptr(),
+              (size_t)output.numel() / comm.size(),
+              xcclDataType,
+              comm,
+              ccl::create_stream(stream.queue()),
+              attr);
+          return ret_evt;
+        },
+        OpType::ALLTOALL_BASE);
+  } else {
+    c10d::checkSplitSizes(inputSplitSizes, inputTensor, size_);
+    c10d::checkSplitSizes(outputSplitSizes, outputTensor, size_);
+
+    return collective(
+        inputTensor,
+        outputTensor,
+        [&](at::Tensor& input,
+            at::Tensor& output,
+            ccl::alltoall_attr attr,
+            xcclComm_t& comm,
+            at::xpu::XPUStream& stream) {
+          std::vector<size_t> sendCounts(size_);
+          std::vector<size_t> recvCounts(size_);
+          bool inputSplitsEqual = inputSplitSizes.size() == 0;
+          bool outputSplitsEqual = outputSplitSizes.size() == 0;
+
+          size_t inLen = input.numel();
+          size_t outLen = output.numel();
+          if (inLen)
+            inLen /= (inputSplitsEqual ? size_ : input.size(0));
+          if (outLen)
+            outLen /= (outputSplitsEqual ? size_ : output.size(0));
+
+          for (int i = 0; i < size_; i++) {
+            sendCounts[i] =
+                (inputSplitsEqual ? inLen : inputSplitSizes[i] * inLen);
+            recvCounts[i] =
+                (outputSplitsEqual ? outLen : outputSplitSizes[i] * outLen);
+          }
+          auto xcclDataType = getXcclDataType(output.scalar_type());
+          ccl::event ret_evt;
+
+          ret_evt = ccl::alltoallv(
+              input.data_ptr(),
+              sendCounts,
+              output.data_ptr(),
+              recvCounts,
+              xcclDataType,
+              comm,
+              ccl::create_stream(stream.queue()),
+              attr);
+          return ret_evt;
+        },
+        OpType::ALLTOALL_BASE);
+  }
 }
 
 } // namespace c10d

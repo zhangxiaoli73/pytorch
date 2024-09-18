@@ -278,9 +278,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       at::Tensor& inputTensor,
       std::vector<int64_t>& outputSplitSizes,
       std::vector<int64_t>& inputSplitSizes,
-      const AllToAllOptions& opts = AllToAllOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::alltoall_base not implemented");
-  }
+      const AllToAllOptions& opts = AllToAllOptions()) override;
 
   c10::intrusive_ptr<Work> alltoall(
       std::vector<at::Tensor>& outputTensors,
