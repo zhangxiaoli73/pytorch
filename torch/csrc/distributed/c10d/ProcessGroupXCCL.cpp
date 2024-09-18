@@ -1158,7 +1158,8 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall_base(
           return ret_evt;
         },
         OpType::ALLTOALL_BASE);
-  } else {
+  } 
+  else {
     c10d::checkSplitSizes(inputSplitSizes, inputTensor, size_);
     c10d::checkSplitSizes(outputSplitSizes, outputTensor, size_);
 
@@ -1167,7 +1168,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall_base(
         outputTensor,
         [&](at::Tensor& input,
             at::Tensor& output,
-            ccl::alltoall_attr attr,
+            ccl::alltoallv_attr attr,
             xcclComm_t& comm,
             at::xpu::XPUStream& stream) {
           std::vector<size_t> sendCounts(size_);
