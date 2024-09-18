@@ -91,6 +91,44 @@ XCCL_KVS get_kvs(int rank, c10d::Store& store) {
   return kvs;
 }
 
+bool computeLengthsAndCheckAndGetFlat(
+    const std::vector<at::Tensor>& tensors,
+    std::vector<size_t>& lengths,
+    at::Tensor& flatTensor,
+    int64_t& flatLength) {
+  int64_t groupSize = tensors.size();
+  auto firstTensor = tensors[0];
+  int64_t totalSize = 0;
+  bool isFlat = true;
+
+  auto storage = firstTensor.storage();
+  int64_t firstStorageOffset = firstTensor.storage_offset();
+
+  for (int i = 0; i < groupSize; i++) {
+    auto& curTensor = tensors[i];
+    int64_t length = curTensor.numel();
+    lengths[i] = length;
+    totalSize += length;
+
+    if (isFlat &&
+        (!storage.is_alias_of(curTensor.storage()) ||
+         curTensor.storage_offset() !=
+             firstStorageOffset + totalSize - length)) {
+      isFlat = false;
+    }
+  }
+
+  flatLength = totalSize;
+
+  if (isFlat) {
+    flatTensor = firstTensor;
+  } else {
+    flatTensor = at::empty({totalSize}, firstTensor.options());
+  }
+
+  return isFlat;
+}
+
 bool check_same_size(const std::vector<at::Tensor>& input_tensors) {
   for (const auto& input_tensor : input_tensors) {
     if (!input_tensors[0].is_same_size(input_tensor)) {
@@ -1158,8 +1196,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall_base(
           return ret_evt;
         },
         OpType::ALLTOALL_BASE);
-  } 
-  else {
+  } else {
     c10d::checkSplitSizes(inputSplitSizes, inputTensor, size_);
     c10d::checkSplitSizes(outputSplitSizes, outputTensor, size_);
 
@@ -1205,6 +1242,81 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall_base(
         },
         OpType::ALLTOALL_BASE);
   }
+}
+
+c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall(
+    std::vector<at::Tensor>& outputTensors,
+    std::vector<at::Tensor>& inputTensors,
+    const AllToAllOptions& /* unused */) {
+  auto device = outputTensors[0].device();
+  for (const auto r : c10::irange(outputTensors.size())) {
+    check_xpu_single_tensor(outputTensors[r], true);
+    check_xpu_single_tensor(inputTensors[r], true);
+    TORCH_CHECK(
+        device == outputTensors[r].device() &&
+            device == inputTensors[r].device(),
+        "Tensors must be on the same device")
+  }
+
+  return collective(
+      inputTensors,
+      outputTensors,
+      [&](at::Tensor& /* unused */,
+          at::Tensor& /* unused */,
+          ccl::alltoallv_attr attr,
+          xcclComm_t& comm,
+          at::xpu::XPUStream& stream) {
+        c10::OptionalStreamGuard stream_guard(stream.unwrap());
+        at::Tensor flatInput;
+        at::Tensor flatOutput;
+
+        std::vector<size_t> sendCounts(size_);
+        std::vector<size_t> recvCounts(size_);
+
+        int64_t flatSendCount;
+        int64_t flatRecvCount;
+
+        bool isInputFlat = computeLengthsAndCheckAndGetFlat(
+            inputTensors, sendCounts, flatInput, flatSendCount);
+        bool isOutputFlat = computeLengthsAndCheckAndGetFlat(
+            outputTensors, recvCounts, flatOutput, flatRecvCount);
+        if (!isInputFlat) {
+          auto flatInputSplits = flatInput.split_with_sizes(
+              c10::IntArrayRef((int64_t*)sendCounts.data(), sendCounts.size()),
+              0);
+
+          for (int i = 0; i < size_; i++) {
+            flatInputSplits[i].copy_(inputTensors[i].view({-1}));
+          }
+        }
+
+        auto xcclDataType = getXcclDataType(flatOutput.scalar_type());
+        ccl::event ret_evt;
+        ret_evt = ccl::alltoallv(
+            flatInput.data_ptr(),
+            sendCounts,
+            flatOutput.data_ptr(),
+            recvCounts,
+            xcclDataType,
+            comm,
+            ccl::create_stream(stream.queue()),
+            attr);
+
+        if (!isOutputFlat) {
+          ret_evt.wait();
+          auto flatOutputSplits = flatOutput.split_with_sizes(
+              c10::IntArrayRef((int64_t*)recvCounts.data(), recvCounts.size()),
+              0);
+
+          for (int i = 0; i < size_; i++) {
+            outputTensors[i].view({-1}).copy_(flatOutputSplits[i]);
+          }
+        }
+
+        stream.synchronize();
+        return ret_evt;
+      },
+      OpType::ALLTOALL);
 }
 
 } // namespace c10d

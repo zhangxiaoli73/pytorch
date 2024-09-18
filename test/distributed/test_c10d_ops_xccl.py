@@ -181,31 +181,30 @@ class ProcessGroupXCCLOpTest(MultiProcContinousTest):
             with self.assertRaisesRegex(ValueError, "Cannot use " + err + " with XCCL"):
                 allreduce(tensors, op)
 
-    # TODO: wait all2all
-    # @requires_xccl()
-    # @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
-    # def test_alltoall_ops_with_xpufree_race(self):
-    #     pg = self.pg
-    #     opts = c10d.AllToAllOptions()
-    #     local_device = f"xpu:{self.rank_to_GPU[self.rank][0]}"
-    #     torch.xpu.set_device(local_device)
-    #     input = torch.rand(1000, 1000, device=local_device)
-    #     output = torch.rand(1000, 1000, device=local_device)
-    #     race_tensors = []
-    #     # create some tensors to race with alltoall collective
-    #     for _ in range(10):
-    #         tmp = []
-    #         for i in range(5):
-    #             tmp.append(torch.rand(10 ** (3 + i), device=local_device))
-    #         race_tensors.append(tmp)
+    @requires_xccl()
+    @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
+    def test_alltoall_ops_with_xpufree_race(self):
+        pg = self.pg
+        opts = c10d.AllToAllOptions()
+        local_device = f"xpu:{self.rank_to_GPU[self.rank][0]}"
+        torch.xpu.set_device(local_device)
+        input = torch.rand(1000, 1000, device=local_device)
+        output = torch.rand(1000, 1000, device=local_device)
+        race_tensors = []
+        # create some tensors to race with alltoall collective
+        for _ in range(10):
+            tmp = []
+            for i in range(5):
+                tmp.append(torch.rand(10 ** (3 + i), device=local_device))
+            race_tensors.append(tmp)
 
-    #     for i in range(10):
-    #         race_tensors.pop()
-    #         work = pg.alltoall_base(output, input, [], [], opts)
-    #         # this triggers xpuFree
-    #         torch.xpu.empty_cache()
-    #         work.wait()
-    #     torch.xpu.synchronize(device=local_device)
+        for i in range(10):
+            race_tensors.pop()
+            work = pg.alltoall_base(output, input, [], [], opts)
+            # this triggers xpuFree
+            torch.xpu.empty_cache()
+            work.wait()
+        torch.xpu.synchronize(device=local_device)
 
     # TODO: wait reduce
     # @requires_xccl()
