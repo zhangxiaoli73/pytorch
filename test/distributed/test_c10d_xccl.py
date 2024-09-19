@@ -1,18 +1,11 @@
 # Owner(s): ["oncall: distributed"]
 
-import copy
-import logging
 import math
-import operator
 import os
-import random
 import sys
-
 import time
-import tempfile
 from datetime import timedelta
-from functools import reduce
-from unittest import mock, SkipTest
+from unittest import mock
 
 import torch
 import torch.distributed as c10d
@@ -23,26 +16,22 @@ if not c10d.is_available() or not c10d.is_xccl_available():
     sys.exit(0)
 
 import test_c10d_common
-from test_c10d_common import DoubleGpuNet, gpus_for_rank, ModuleForDdpCommHook
 
 import torch.distributed as dist
-import torch.nn.functional as F
 import torch.testing._internal.common_utils as common
-from torch import nn
-from torch.nn.parallel import DistributedDataParallel
 from torch.testing._internal.common_distributed import (
+    init_multigpu_helper,
     MultiProcessTestCase,
     requires_xccl,
-    init_multigpu_helper,
-    skip_if_lt_x_gpu,
 )
 from torch.testing._internal.common_utils import (
-    skip_but_pass_in_sandcastle_if,
-    TEST_XPU,
     retry_on_connect_failures,
     run_tests,
+    skip_but_pass_in_sandcastle_if,
+    TEST_XPU,
     TestCase,
 )
+
 
 def simple_reduce_tests(rank, world_size):
     tests = [
@@ -70,7 +59,9 @@ def simple_reduce_tests(rank, world_size):
 
     return tests
 
+
 TEST_MULTIXPU = torch.xpu.device_count() > 1
+
 
 class RendezvousEnvTest(TestCase):
     @retry_on_connect_failures
@@ -171,6 +162,7 @@ class RendezvousEnvTest(TestCase):
             self.assertEqual(rank, 0)
             self.assertEqual(size, 1)
 
+
 class TimeoutTest(test_c10d_common.AbstractTimeoutTest, TestCase):
     @requires_xccl()
     @retry_on_connect_failures
@@ -178,8 +170,11 @@ class TimeoutTest(test_c10d_common.AbstractTimeoutTest, TestCase):
     def test_default_store_timeout_nccl(self):
         self._test_default_store_timeout("xccl")
 
+
 class ProcessGroupXCCLTest(MultiProcessTestCase):
-    def _create_process_group_xccl(self, timeout=timedelta(seconds=600), device_id=None):
+    def _create_process_group_xccl(
+        self, timeout=timedelta(seconds=600), device_id=None
+    ):
         store = c10d.FileStore(self.file_name, self.world_size)
         c10d.init_process_group(
             "xccl",
@@ -286,7 +281,7 @@ class ProcessGroupXCCLTest(MultiProcessTestCase):
             result = fut.value()
             self.assertEqual(expected, result[0], exact_dtype=False)
 
-        x = fn(torch.tensor([self.rank + 1.0], device = device))
+        x = fn(torch.tensor([self.rank + 1.0], device=device))
         fut = pg.allreduce(x).get_future()
         fut.wait()
         result = fut.value()
@@ -300,11 +295,9 @@ class ProcessGroupXCCLTest(MultiProcessTestCase):
         self._test_allreduce_basics(lambda t: t.clone())
 
 
-
 if __name__ == "__main__":
     assert (
         not torch.xpu._initialized
     ), "test_distributed must not have initialized XPU context on main process"
 
     run_tests()
-

@@ -41,7 +41,6 @@
 #include <torch/csrc/distributed/c10d/ProcessGroupXCCL.hpp>
 #endif
 
-
 #include <fmt/format.h>
 #include <pybind11/chrono.h>
 #include <torch/csrc/distributed/c10d/DMAConnectivity.hpp>

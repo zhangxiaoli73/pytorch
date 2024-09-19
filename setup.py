@@ -648,7 +648,7 @@ class build_ext(setuptools.command.build_ext.build_ext):
         if cmake_cache_vars["USE_XCCL"]:
             report("-- Building XCCL library")
         else:
-            report("-- Not using XCCL") 
+            report("-- Not using XCCL")
         if cmake_cache_vars["USE_DISTRIBUTED"]:
             if IS_WINDOWS:
                 report("-- Building without distributed package")

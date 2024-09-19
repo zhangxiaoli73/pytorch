@@ -1111,9 +1111,11 @@ def is_ucc_available() -> bool:
     """Check if the UCC backend is available."""
     return _UCC_AVAILABLE
 
+
 def is_xccl_available() -> bool:
     """Check if the XCCL backend is available."""
     return _XCCL_AVAILABLE
+
 
 def is_backend_available(backend: str) -> bool:
     """
@@ -1367,7 +1369,7 @@ def _set_pg_timeout(timeout: timedelta, group: Optional[ProcessGroup] = None) ->
             backends.add(backend)  # type: ignore[arg-type]
         elif is_gloo_available() and isinstance(backend, ProcessGroupGloo):
             backends.add(backend)  # type: ignore[arg-type]
-    if torch.device("xpu") in devices and is_xpu_available():
+    if torch.device("xpu") in devices and is_xccl_available():
         backend = group._get_backend(torch.device("xpu"))
         if isinstance(backend, ProcessGroupXCCL):
             backends.add(backend)  # type: ignore[arg-type]
@@ -1672,7 +1674,10 @@ def _new_process_group_helper(
             "created, please use a different group name"
         )
 
-    if device_id is not None and (device_id.index is None or (device_id.type != "cuda" and device_id.type != "xpu")):
+    if device_id is not None and (
+        device_id.index is None
+        or (device_id.type != "cuda" and device_id.type != "xpu")
+    ):
         raise ValueError(
             "init_process_group device_id parameter must be a cuda device with an "
             "id, e.g. cuda:0, xpu, not just cuda or xpu or cpu"
