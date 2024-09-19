@@ -163,36 +163,26 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       const std::vector<at::Tensor>& inputs = {},
       const std::vector<at::Tensor>& outputs = {});
 
-  template <typename Fn, typename input_t, typename output_t>
+  template <typename Fn>
   c10::intrusive_ptr<Work> collective(
-      input_t& input,
-      output_t& output,
+      at::Tensor& input,
+      at::Tensor& output,
       Fn fn,
       OpType opType);
 
-  template <
-      typename Fn,
-      typename input_t,
-      typename output_t,
-      typename PreProcess,
-      typename PostProcess>
+  template <typename Fn, typename PreProcess, typename PostProcess>
   c10::intrusive_ptr<Work> collective(
-      input_t& input,
-      output_t& output,
+      at::Tensor& input,
+      at::Tensor& output,
       Fn fn,
       PreProcess pre,
       PostProcess post,
       OpType opType);
 
-  template <
-      typename Fn,
-      typename input_t,
-      typename output_t,
-      typename PreProcess,
-      typename PostProcess>
+  template <typename Fn, typename PreProcess, typename PostProcess>
   c10::intrusive_ptr<Work> collective(
-      std::vector<input_t>& inputs,
-      std::vector<output_t>& outputs,
+      std::vector<at::Tensor>& inputs,
+      std::vector<at::Tensor>& outputs,
       Fn fn,
       PreProcess pre,
       PostProcess post,
@@ -224,14 +214,19 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     TORCH_CHECK(false, "ProcessGroupXCCL::reduce not implemented");
   }
 
-  c10::intrusive_ptr<Work> broadcast(
-      std::vector<at::Tensor>& tensors,
-      const BroadcastOptions& opts = BroadcastOptions()) override;
-
   c10::intrusive_ptr<Work> _reduce_oop(
       at::Tensor& outputTensors,
       at::Tensor& inputTensors,
       const ReduceOptions& opts = ReduceOptions());
+
+  c10::intrusive_ptr<Work> broadcast(
+      std::vector<at::Tensor>& tensors,
+      const BroadcastOptions& opts = BroadcastOptions()) override;
+
+  c10::intrusive_ptr<Work> _broadcast_oop(
+      at::Tensor& outputTensor,
+      at::Tensor& inputTensor,
+      const BroadcastOptions& opts);
 
   c10::intrusive_ptr<Work> allgather(
       std::vector<std::vector<at::Tensor>>& outputTensors,
