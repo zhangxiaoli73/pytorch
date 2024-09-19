@@ -220,9 +220,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
   c10::intrusive_ptr<Work> reduce(
       std::vector<at::Tensor>& tensors,
-      const ReduceOptions& opts = ReduceOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::reduce not implemented");
-  }
+      const ReduceOptions& opts = ReduceOptions()) override;
 
   c10::intrusive_ptr<Work> broadcast(
       std::vector<at::Tensor>& tensors,

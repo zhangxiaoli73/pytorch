@@ -59,42 +59,41 @@ class ProcessGroupXCCLOpTest(MultiProcContinousTest):
         # return rank to GPU map
         return init_multigpu_helper(self.world_size, "xccl")
 
-    # TODO: wait reduce
-    # @requires_xccl()
-    # @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
-    # def test_empty_tensors(self):
-    #     pg = self.pg
-    #     local_device_idx = self.rank_to_GPU[self.rank][0]
+    @requires_xccl()
+    @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
+    def test_empty_tensors(self):
+        pg = self.pg
+        local_device_idx = self.rank_to_GPU[self.rank][0]
 
-    #     xs = [torch.FloatTensor([]).xpu(local_device_idx)]
-    #     pg.broadcast(xs).wait()
-    #     self.assertEqual(0, xs[0].numel())
+        xs = [torch.FloatTensor([]).xpu(local_device_idx)]
+        pg.broadcast(xs).wait()
+        self.assertEqual(0, xs[0].numel())
 
-    #     pg.allreduce(xs).wait()
-    #     self.assertEqual(0, xs[0].numel())
+        pg.allreduce(xs).wait()
+        self.assertEqual(0, xs[0].numel())
 
-    #     pg.reduce(xs).wait()
-    #     self.assertEqual(0, xs[0].numel())
+        pg.reduce(xs).wait()
+        self.assertEqual(0, xs[0].numel())
 
-    #     ys = [
-    #         [
-    #             torch.FloatTensor([]).xpu(local_device_idx)
-    #             for _ in range(self.world_size)
-    #         ]
-    #     ]
-    #     pg.allgather(ys, xs).wait()
-    #     for y in ys[0]:
-    #         self.assertEqual(0, y.numel())
+        ys = [
+            [
+                torch.FloatTensor([]).xpu(local_device_idx)
+                for _ in range(self.world_size)
+            ]
+        ]
+        pg.allgather(ys, xs).wait()
+        for y in ys[0]:
+            self.assertEqual(0, y.numel())
 
-    #     ys = [torch.FloatTensor([]).xpu(local_device_idx)]
-    #     xs = [
-    #         [
-    #             torch.FloatTensor([]).xpu(local_device_idx)
-    #             for _ in range(self.world_size)
-    #         ]
-    #     ]
-    #     pg.reduce_scatter(ys, xs).wait()
-    #     self.assertEqual(0, ys[0].numel())
+        ys = [torch.FloatTensor([]).xpu(local_device_idx)]
+        xs = [
+            [
+                torch.FloatTensor([]).xpu(local_device_idx)
+                for _ in range(self.world_size)
+            ]
+        ]
+        pg.reduce_scatter(ys, xs).wait()
+        self.assertEqual(0, ys[0].numel())
 
     @requires_xccl()
     @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
@@ -206,71 +205,47 @@ class ProcessGroupXCCLOpTest(MultiProcContinousTest):
             work.wait()
         torch.xpu.synchronize(device=local_device)
 
-    # TODO: wait reduce
-    # @requires_xccl()
-    # @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
-    # def test_reduce_ops(self):
-    #     pg = self.pg
-    #     local_device_id = self.rank_to_GPU[self.rank][0]
+    @requires_xccl()
+    @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
+    def test_reduce_ops(self):
+        pg = self.pg
+        local_device_id = self.rank_to_GPU[self.rank][0]
 
-    #     def reduce(xs, rootRank, rootTensor, op=None):
-    #         opts = c10d.ReduceOptions()
-    #         opts.rootRank = rootRank
-    #         opts.rootTensor = rootTensor
-    #         if op:
-    #             opts.reduceOp = op
-    #         work = pg.reduce(xs, opts)
-    #         work.wait()
+        def reduce(xs, rootRank, rootTensor, op=None):
+            opts = c10d.ReduceOptions()
+            opts.rootRank = rootRank
+            opts.rootTensor = rootTensor
+            if op:
+                opts.reduceOp = op
+            work = pg.reduce(xs, opts)
+            work.wait()
 
-    #     # for every root tensor
-    #     for rt in range(self.world_size):
-    #         tensors = [torch.tensor([self.rank + 1]).xpu(local_device_id)]
+        # for every root tensor
+        for rt in range(self.world_size):
+            tensors = [torch.tensor([self.rank + 1]).xpu(local_device_id)]
 
-    #         reduce(tensors, rt, 0)
+            reduce(tensors, rt, 0)
 
-    #         if self.rank == rt:
-    #             self.assertEqual(
-    #                 torch.tensor([self.world_size * (self.world_size + 1) // 2]),
-    #                 tensors[0],
-    #             )
-    #         else:
-    #             self.assertEqual(
-    #                 torch.tensor([self.rank + 1]),
-    #                 tensors[0],
-    #             )
+            if self.rank == rt:
+                self.assertEqual(
+                    torch.tensor([self.world_size * (self.world_size + 1) // 2]),
+                    tensors[0],
+                )
+            else:
+                self.assertEqual(
+                    torch.tensor([self.rank + 1]),
+                    tensors[0],
+                )
 
-    #         for op, err in zip(
-    #             (c10d.ReduceOp.BAND, c10d.ReduceOp.BOR, c10d.ReduceOp.BXOR),
-    #             ("ReduceOp.BAND", "ReduceOp.BOR", "ReduceOp.BXOR"),
-    #         ):
-    #             with self.assertRaisesRegex(
-    #                 ValueError, "Cannot use " + err + " with XCCL"
-    #             ):
-    #                 reduce(tensors, self.rank, rt, op)
+            for op, err in zip(
+                (c10d.ReduceOp.BAND, c10d.ReduceOp.BOR, c10d.ReduceOp.BXOR),
+                ("ReduceOp.BAND", "ReduceOp.BOR", "ReduceOp.BXOR"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "Cannot use " + err + " with XCCL"
+                ):
+                    reduce(tensors, self.rank, rt, op)
 
-    #         # Premul sum
-    #         if torch.xpu.xccl.version() >= (2, 11, 1):
-    #             for factor in (3.0, torch.tensor([5.0], device=local_device_id)):
-    #                 if isinstance(factor, torch.Tensor):
-    #                     factor_ref = factor.cpu().item()
-    #                 else:
-    #                     factor_ref = factor
-    #                 float_tensors = [
-    #                     torch.tensor(
-    #                         [self.rank + 1.0], device=f"xpu:{local_device_id}"
-    #                     )
-    #                 ]
-    #                 float_tensors_ref = [
-    #                     torch.tensor(
-    #                         [(self.rank + 1.0) * factor_ref],
-    #                         device=f"xpu:{local_device_id}",
-    #                     )
-    #                 ]
-
-    #                 reduce(float_tensors_ref, rt, 0)
-    #                 reduce(float_tensors, rt, 0, c10d._make_xccl_premul_sum(factor))
-    #                 if self.rank == rt:
-    #                     self.assertEqual(float_tensors_ref[0], float_tensors[0])
 
     @requires_xccl()
     @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")

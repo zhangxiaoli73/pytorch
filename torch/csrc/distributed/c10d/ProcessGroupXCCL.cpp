@@ -228,6 +228,18 @@ ccl::reduction getXcclReduceOp(const ReduceOp& reduceOp, at::Tensor& input) {
   }
 }
 
+bool complexViewAsRealAllowed(const ReduceOp reduceOp) {
+  switch (reduceOp) {
+    case ReduceOp::SUM:
+      return true;
+    case ReduceOp::UNUSED:
+      return true;
+    default:
+      return false;
+  }
+  return false;
+}
+
 } // namespace
 
 static std::mutex xcclCommDevIdxMapMutex;
@@ -693,6 +705,14 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
     const AllreduceOptions& opts) {
   TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
   auto tensor = tensors.back();
+  if (tensor.is_complex()) {
+    TORCH_CHECK(
+        complexViewAsRealAllowed(opts.reduceOp),
+        "all_reduce does not support",
+        opts.reduceOp,
+        "on complex tensors");
+    tensor = at::view_as_real(tensor);
+  }
   check_xpu_single_tensor(tensor);
   TORCH_CHECK(
       !isFloat8Type(tensor.scalar_type()),
@@ -767,6 +787,48 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::broadcast(
         return ret_evt;
       },
       OpType::BROADCAST);
+}
+
+c10::intrusive_ptr<Work> ProcessGroupXCCL::reduce(
+    std::vector<at::Tensor>& tensors,
+    const ReduceOptions& opts) {
+  TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
+  // @lint-ignore CLANGTIDY
+  auto tensor = tensors.back();
+  if (tensor.is_complex()) {
+    TORCH_CHECK(
+        complexViewAsRealAllowed(opts.reduceOp),
+        "reduce does not support",
+        opts.reduceOp,
+        "on complex tensors");
+    tensor = at::view_as_real(tensor);
+  }
+  check_xpu_single_tensor(tensor);
+
+  return collective(
+      tensor,
+      tensor,
+      [&](at::Tensor& input,
+          at::Tensor& output,
+          ccl::reduce_attr attr,
+          xcclComm_t& comm,
+          at::xpu::XPUStream& stream) {
+        const int root = opts.rootRank + opts.rootTensor;
+        const auto xcclDataType = getXcclDataType(input.scalar_type());
+        const auto xcclReduceOp = getXcclReduceOp(opts.reduceOp, input);
+        ccl::event ret_evt;
+        ret_evt = ccl::reduce(
+            input.data_ptr(),
+            output.data_ptr(),
+            (size_t)input.numel(),
+            xcclDataType,
+            xcclReduceOp,
+            root,
+            comm,
+            ccl::create_stream(stream.queue()));
+        return ret_evt;
+      },
+      OpType::REDUCE);
 }
 
 c10::intrusive_ptr<Work> ProcessGroupXCCL::_reduce_oop(
