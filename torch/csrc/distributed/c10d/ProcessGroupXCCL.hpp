@@ -309,9 +309,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   c10::intrusive_ptr<Work> scatter(
       std::vector<at::Tensor>& outputTensors,
       std::vector<std::vector<at::Tensor>>& inputTensors,
-      const ScatterOptions& opts = ScatterOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::scatter not implemented");
-  }
+      const ScatterOptions& opts = ScatterOptions()) override;
 
  protected:
   std::unordered_map<std::string, at::xpu::XPUStream> xcclStreams_;

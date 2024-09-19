@@ -445,125 +445,124 @@ class ProcessGroupXCCLOpTest(MultiProcContinousTest):
             opts.rootRank = 0
             pg.gather([output_ts], [], opts)
 
-    # TODO: wait scatter
-    # @requires_xccl()
-    # @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
-    # def test_scatter_ops(self):
-    #     pg = self.pg
-    #     local_device_ids = self.rank_to_GPU[self.rank]
-    #     num_gpus = len(local_device_ids)
+    @requires_xccl()
+    @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
+    def test_scatter_ops(self):
+        pg = self.pg
+        local_device_ids = self.rank_to_GPU[self.rank]
+        num_gpus = len(local_device_ids)
 
-    #     def scatter(output_t, input_t, rootRank):
-    #         opts = c10d.ScatterOptions()
-    #         opts.rootRank = rootRank
-    #         if rootRank == self.rank:
-    #             work = pg.scatter(output_t, input_t, opts)
-    #         else:
-    #             work = pg.scatter(output_t, [], opts)
-    #         work.wait()
+        def scatter(output_t, input_t, rootRank):
+            opts = c10d.ScatterOptions()
+            opts.rootRank = rootRank
+            if rootRank == self.rank:
+                work = pg.scatter(output_t, input_t, opts)
+            else:
+                work = pg.scatter(output_t, [], opts)
+            work.wait()
 
-    #     # init output
-    #     tensors = []
-    #     for device_id in local_device_ids:
-    #         tensors.append(torch.tensor([-1]).xpu(device_id))
+        # init output
+        tensors = []
+        for device_id in local_device_ids:
+            tensors.append(torch.tensor([-1]).xpu(device_id))
 
-    #     # init input
-    #     scatter_list = []
-    #     for idx in range(num_gpus):
-    #         gpu_idx = local_device_ids[idx]
-    #         scatter_list.append([])
-    #         for rank in range(self.world_size):
-    #             scatter_list[idx].append(torch.tensor([rank]).xpu(gpu_idx))
+        # init input
+        scatter_list = []
+        for idx in range(num_gpus):
+            gpu_idx = local_device_ids[idx]
+            scatter_list.append([])
+            for rank in range(self.world_size):
+                scatter_list[idx].append(torch.tensor([rank]).xpu(gpu_idx))
 
-    #     # test each rank to scatter
-    #     expected = [torch.tensor([self.rank])]
-    #     for rank in range(self.world_size):
-    #         scatter(tensors, scatter_list, rank)
-    #         self.assertEqual(expected, tensors)
+        # test each rank to scatter
+        expected = [torch.tensor([self.rank])]
+        for rank in range(self.world_size):
+            scatter(tensors, scatter_list, rank)
+            self.assertEqual(expected, tensors)
 
-    # @requires_xccl()
-    # @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
-    # def test_scatter_stress(self):
-    #     pg = self.pg
-    #     local_device_ids = self.rank_to_GPU[self.rank]
-    #     num_gpus = len(local_device_ids)
+    @requires_xccl()
+    @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
+    def test_scatter_stress(self):
+        pg = self.pg
+        local_device_ids = self.rank_to_GPU[self.rank]
+        num_gpus = len(local_device_ids)
 
-    #     def scatter(output_t, input_t, rootRank):
-    #         opts = c10d.ScatterOptions()
-    #         opts.rootRank = rootRank
-    #         if rootRank == self.rank:
-    #             work = pg.scatter(output_t, input_t, opts)
-    #         else:
-    #             work = pg.scatter(output_t, [], opts)
-    #         work.wait()
+        def scatter(output_t, input_t, rootRank):
+            opts = c10d.ScatterOptions()
+            opts.rootRank = rootRank
+            if rootRank == self.rank:
+                work = pg.scatter(output_t, input_t, opts)
+            else:
+                work = pg.scatter(output_t, [], opts)
+            work.wait()
 
-    #     stress_length = 1000
+        stress_length = 1000
 
-    #     # init output
-    #     tensors = []
-    #     for i in range(stress_length):
-    #         tensors.append([])
-    #         for device_id in local_device_ids:
-    #             tensors[i].append(torch.tensor([-1]).xpu(device_id))
+        # init output
+        tensors = []
+        for i in range(stress_length):
+            tensors.append([])
+            for device_id in local_device_ids:
+                tensors[i].append(torch.tensor([-1]).xpu(device_id))
 
-    #     # init input
-    #     scatter_list = []
-    #     for i in range(stress_length):
-    #         scatter_list.append([[] for _ in range(num_gpus)])
-    #         for idx, ls in enumerate(scatter_list[i]):
-    #             gpu_idx = local_device_ids[idx]
-    #             for rank in range(self.world_size):
-    #                 ls.append(torch.tensor([rank]).xpu(gpu_idx))
+        # init input
+        scatter_list = []
+        for i in range(stress_length):
+            scatter_list.append([[] for _ in range(num_gpus)])
+            for idx, ls in enumerate(scatter_list[i]):
+                gpu_idx = local_device_ids[idx]
+                for rank in range(self.world_size):
+                    ls.append(torch.tensor([rank]).xpu(gpu_idx))
 
-    #     # test each rank to scatter
-    #     expected = [torch.tensor([self.rank])]
-    #     for i in range(stress_length):
-    #         for rank in range(self.world_size):
-    #             scatter(tensors[i], scatter_list[i], rank)
-    #             # Verification
-    #             self.assertEqual(tensors[i], expected)
+        # test each rank to scatter
+        expected = [torch.tensor([self.rank])]
+        for i in range(stress_length):
+            for rank in range(self.world_size):
+                scatter(tensors[i], scatter_list[i], rank)
+                # Verification
+                self.assertEqual(tensors[i], expected)
 
-    # @requires_xccl()
-    # @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
-    # def test_scatter_checks(self):
-    #     pg = self.pg
-    #     local_device_ids = self.rank_to_GPU[self.rank]
-    #     num_gpus = len(local_device_ids)
+    @requires_xccl()
+    @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
+    def test_scatter_checks(self):
+        pg = self.pg
+        local_device_ids = self.rank_to_GPU[self.rank]
+        num_gpus = len(local_device_ids)
 
-    #     # init output
-    #     tensors = []
-    #     for device_id in local_device_ids:
-    #         tensors.append(torch.tensor([-1]).xpu(device_id))
+        # init output
+        tensors = []
+        for device_id in local_device_ids:
+            tensors.append(torch.tensor([-1]).xpu(device_id))
 
-    #     # init input
-    #     scatter_list = []
-    #     for idx in range(num_gpus):
-    #         gpu_idx = local_device_ids[idx]
-    #         scatter_list.append([])
-    #         for rank in range(self.world_size):
-    #             scatter_list[idx].append(torch.tensor([rank]).xpu(gpu_idx))
+        # init input
+        scatter_list = []
+        for idx in range(num_gpus):
+            gpu_idx = local_device_ids[idx]
+            scatter_list.append([])
+            for rank in range(self.world_size):
+                scatter_list[idx].append(torch.tensor([rank]).xpu(gpu_idx))
 
-    #     with self.assertRaisesRegex(ValueError, "invalid root rank"):
-    #         opts = c10d.ScatterOptions()
-    #         opts.rootRank = -1
-    #         pg.scatter(tensors, scatter_list, opts)
+        with self.assertRaisesRegex(ValueError, "invalid root rank"):
+            opts = c10d.ScatterOptions()
+            opts.rootRank = -1
+            pg.scatter(tensors, scatter_list, opts)
 
-    #     with self.assertRaisesRegex(TypeError, "incompatible function arguments"):
-    #         pg.scatter(tensors, scatter_list, 0)
+        with self.assertRaisesRegex(TypeError, "incompatible function arguments"):
+            pg.scatter(tensors, scatter_list, 0)
 
-    #     with self.assertRaisesRegex(ValueError, "invalid root rank"):
-    #         opts = c10d.ScatterOptions()
-    #         opts.rootRank = self.world_size
-    #         pg.scatter(tensors, scatter_list, opts)
+        with self.assertRaisesRegex(ValueError, "invalid root rank"):
+            opts = c10d.ScatterOptions()
+            opts.rootRank = self.world_size
+            pg.scatter(tensors, scatter_list, opts)
 
-    #     with self.assertRaisesRegex(
-    #         # throws error message from dispatcher
-    #         RuntimeError,
-    #         "There were no tensor arguments to this function",
-    #     ):
-    #         opts = c10d.ScatterOptions()
-    #         opts.rootRank = 0
-    #         pg.scatter([], scatter_list, opts)
+        with self.assertRaisesRegex(
+            # throws error message from dispatcher
+            RuntimeError,
+            "There were no tensor arguments to this function",
+        ):
+            opts = c10d.ScatterOptions()
+            opts.rootRank = 0
+            pg.scatter([], scatter_list, opts)
 
     @requires_xccl()
     @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
