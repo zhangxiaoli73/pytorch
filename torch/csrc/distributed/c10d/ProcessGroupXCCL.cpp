@@ -68,7 +68,7 @@ XCCL_KVS get_kvs(int rank, c10d::Store& store) {
   std::lock_guard<std::mutex> lock(kvs_mutex);
   if (kvs)
     return kvs;
-  std::string storeKey = "ccl_kvs";
+  std::string storeKey = "xccl_kvs";
 
   // Rank 0 broadcast the bootstrap network information to other ranks
   if (rank == 0) {
@@ -329,11 +329,7 @@ bool ProcessGroupXCCL::WorkXCCL::wait(std::chrono::milliseconds timeout) {
 }
 
 constexpr const char* MULTI_DEVICE_ERROR_MSG =
-    "Expecting one tensor only but got multiple. You are probably using multiple "
-    "devices under one thread. The support for such usage has been deprecated. "
-    "For details, please refer to "
-    "https://pytorch.org/docs/stable/distributed.html#multi-gpu-collective-functions. "
-    "ProcessGroupXCCL continues supporting multi-process and multi-thread modes.";
+    "Expecting one tensor only but got multiple";
 
 ProcessGroupXCCL::ProcessGroupXCCL(
     const c10::intrusive_ptr<Store>& store,
@@ -486,17 +482,10 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::endCoalescing() {
   return endCoalescing(OpType::COALESCED);
 }
 
-// align with single-device style, input_t and output_t due to
-// allgatherv need vector output
-template <
-    typename Fn,
-    typename input_t,
-    typename output_t,
-    typename PreProcess,
-    typename PostProcess>
+template <typename Fn, typename PreProcess, typename PostProcess>
 c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
-    std::vector<input_t>& inputs,
-    std::vector<output_t>& outputs,
+    std::vector<at::Tensor>& inputs,
+    std::vector<at::Tensor>& outputs,
     Fn fn,
     PreProcess pre,
     PostProcess post,
@@ -578,28 +567,23 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   return work;
 }
 
-template <
-    typename Fn,
-    typename input_t,
-    typename output_t,
-    typename PreProcess,
-    typename PostProcess>
+template <typename Fn, typename PreProcess, typename PostProcess>
 c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
-    input_t& input,
-    output_t& output,
+    at::Tensor& input,
+    at::Tensor& output,
     Fn fn,
     PreProcess pre,
     PostProcess post,
     OpType opType) {
-  auto inputs = std::vector<input_t>{input};
-  auto outputs = std::vector<output_t>{output};
+  auto inputs = std::vector<at::Tensor>{input};
+  auto outputs = std::vector<at::Tensor>{output};
   return collective(inputs, outputs, fn, pre, post, opType);
 }
 
-template <typename Fn, typename input_t, typename output_t>
+template <typename Fn>
 c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
-    input_t& input,
-    output_t& output,
+    at::Tensor& input,
+    at::Tensor& output,
     Fn fn,
     OpType opType) {
   return collective<Fn>(
@@ -986,6 +970,39 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::broadcast(
       OpType::BROADCAST);
 }
 
+c10::intrusive_ptr<Work> ProcessGroupXCCL::_broadcast_oop(
+    at::Tensor& outputTensor,
+    at::Tensor& inputTensor,
+    const BroadcastOptions& opts) {
+  if (outputTensor.numel() != inputTensor.numel()) {
+    C10_THROW_ERROR(
+        ValueError,
+        "Tensor input and output of _broadcast_oop must have the same number of elements ");
+  }
+  const auto root = opts.rootRank + opts.rootTensor;
+  return collective(
+      inputTensor,
+      outputTensor,
+      [&](at::Tensor& input,
+          at::Tensor& output,
+          ccl::broadcast_attr attr,
+          xcclComm_t& comm,
+          at::xpu::XPUStream& stream) {
+        auto xcclDataType = getXcclDataType(input.scalar_type());
+        ccl::event ret_evt;
+        ret_evt = ccl::broadcast(
+            input.data_ptr(),
+            (size_t)input.numel(),
+            xcclDataType,
+            root,
+            comm,
+            ccl::create_stream(stream.queue()),
+            attr);
+        return ret_evt;
+      },
+      OpType::BROADCAST);
+}
+
 c10::intrusive_ptr<Work> ProcessGroupXCCL::reduce(
     std::vector<at::Tensor>& tensors,
     const ReduceOptions& opts) {
@@ -1116,48 +1133,17 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allgather(
         },
         OpType::ALLGATHER);
   } else {
-    // xccl implemented allgatherv, so broadcast_oop not needed
-    return collective(
-        inputTensor,
-        outputTensors_,
-        [=](at::Tensor& input,
-            const std::vector<at::Tensor>& outputs,
-            ccl::allgatherv_attr attr,
-            xcclComm_t& comm,
-            at::xpu::XPUStream& stream) {
-          ccl::event ret_evt;
-          auto xcclDataType = getXcclDataType(input.scalar_type());
-
-          std::vector<size_t> recvCounts(outputs.size(), 0);
-          std::transform(
-              outputs.begin(),
-              outputs.end(),
-              recvCounts.begin(),
-              [](const at::Tensor& t) { return t.numel(); });
-
-          TORCH_CHECK(
-              (size_t)input.numel() == recvCounts[rank_],
-              "allgather: send and recv count doesn't match");
-
-          std::vector<void*> recvBufs(outputs.size(), nullptr);
-          std::transform(
-              outputs.begin(),
-              outputs.end(),
-              recvBufs.begin(),
-              [](const at::Tensor& t) { return t.data_ptr(); });
-
-          ret_evt = ccl::allgatherv(
-              input.data_ptr(),
-              (size_t)input.numel(),
-              recvBufs,
-              recvCounts,
-              xcclDataType,
-              comm,
-              ccl::create_stream(stream.queue()),
-              attr);
-          return ret_evt;
-        },
-        c10d::OpType::ALLGATHER);
+    const auto num_reduces = outputTensors_.size();
+    startCoalescing();
+    for (const int i : c10::irange(num_reduces)) {
+      auto& output = outputTensors_[i];
+      auto& input = (i == rank_) ? inputTensor : output;
+      auto broadcastOpts = BroadcastOptions{
+          static_cast<int64_t>(i), static_cast<int64_t>(0), opts.timeout};
+      _broadcast_oop(output, input, broadcastOpts);
+    }
+    auto work = endCoalescing(OpType::ALLGATHER);
+    return work;
   }
 }
 

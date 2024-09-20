@@ -326,7 +326,7 @@ def requires_xccl():
         not c10d.is_xccl_available(),
         "c10d was not compiled with the XCCL backend",
     )
-    
+
 def requires_ucc():
     return skip_but_pass_in_sandcastle_if(
         not c10d.is_ucc_available(),
@@ -340,9 +340,9 @@ def requires_mpi():
     )
 
 
-def skip_if_rocm(func):
+def skip_if_rocm_multiprocess(func):
     """Skips a test for ROCm"""
-    func.skip_if_rocm = True
+    func.skip_if_rocm_multiprocess = True
 
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -561,8 +561,14 @@ class MultiProcessTestCase(TestCase):
         if methodName != "runTest":
             method_name = methodName
         super().__init__(method_name)
-        fn = getattr(self, method_name)
-        setattr(self, method_name, self.join_or_run(fn))
+        try:
+            fn = getattr(self, method_name)
+            setattr(self, method_name, self.join_or_run(fn))
+        except AttributeError as e:
+            if methodName != 'runTest':
+                # we allow instantiation with no explicit method name
+                # but not an *incorrect* or missing method name
+                raise ValueError(f"no such test method in {self.__class__}: {methodName}") from e
 
     def setUp(self) -> None:
         super().setUp()
@@ -1014,8 +1020,14 @@ class MultiThreadedTestCase(TestCase):
         if methodName != "runTest":
             method_name = methodName
         super().__init__(method_name)
-        fn = getattr(self, method_name)
-        setattr(self, method_name, self.join_or_run(fn))
+        try:
+            fn = getattr(self, method_name)
+            setattr(self, method_name, self.join_or_run(fn))
+        except AttributeError as e:
+            if methodName != 'runTest':
+                # we allow instantiation with no explicit method name
+                # but not an *incorrect* or missing method name
+                raise ValueError(f"no such test method in {self.__class__}: {methodName}") from e
 
     def perThreadSetUp(self):
         # super().setUp()  # TestCase.setUp() calls torch.manual_seed()

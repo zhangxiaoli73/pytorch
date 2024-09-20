@@ -510,7 +510,7 @@ namespace {
 #define REGISTER_C10D_OP(FUNC)  \
   REGISTER_C10D_OP1(FUNC, CPU)  \
   REGISTER_C10D_OP1(FUNC, CUDA) \
-  REGISTER_C10D_OP1(FUNC, XPU) \
+  REGISTER_C10D_OP1(FUNC, XPU)  \
   REGISTER_C10D_OP1(FUNC, PrivateUse1)
 
 // Now we start to register ops with the three device keys

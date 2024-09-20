@@ -66,7 +66,11 @@ def gpus_for_rank(world_size):
     On a single node, all visible GPUs are evenly
     divided to subsets, each process only uses a subset.
     """
-    device_count = torch.xpu.device_count() if torch.xpu.is_available() else torch.cuda.device_count()
+    device_count = (
+        torch.xpu.device_count()
+        if torch.xpu.is_available()
+        else torch.cuda.device_count()
+    )
     visible_devices = list(range(device_count))
     gpus_per_process = device_count // world_size
     gpus_for_rank = []
@@ -1816,6 +1820,7 @@ class ProcessGroupWithDispatchedCollectivesTests(MultiProcessTestCase):
 
     def test_init_process_group_for_all_backends(self):
         for backend in dist.Backend.backend_list:
+            excepted_backend = backend
             # skip if the backend is not available on the system
             if backend == dist.Backend.UNDEFINED:
                 continue
@@ -1831,6 +1836,11 @@ class ProcessGroupWithDispatchedCollectivesTests(MultiProcessTestCase):
             elif backend == dist.Backend.UCC:
                 if not dist.is_ucc_available():
                     continue
+            # Multi-threaded PG is defined as a pure python class.
+            # Its pg.name() does not going through Pybind, so its backend name
+            # is still "threaded" instead of "custom".
+            elif backend != "threaded":
+                excepted_backend = "custom"
 
             with tempfile.NamedTemporaryFile(delete=False) as f:
                 store = dist.FileStore(f.name, self.world_size)
@@ -1843,7 +1853,7 @@ class ProcessGroupWithDispatchedCollectivesTests(MultiProcessTestCase):
                 pg = c10d._get_default_group()
                 self.assertEqual(pg.rank(), self.rank)
                 self.assertEqual(pg.size(), self.world_size)
-                self.assertEqual(pg.name(), str(backend))
+                self.assertEqual(pg.name(), str(excepted_backend))
 
                 dist.destroy_process_group()
 
