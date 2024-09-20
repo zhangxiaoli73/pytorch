@@ -4,6 +4,7 @@
 #include <sstream>
 
 #ifdef USE_C10D_XCCL
+#include <comm/XPUGuard.h>
 #include <exception>
 #include <map>
 #include <stdexcept>
@@ -459,6 +460,8 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
 
   work->outputs_ = std::make_shared<std::vector<at::Tensor>>(outputs);
 
+  at::xpu::OptionalXPUGuard gpuGuard(device);
+
   pre(stream, work);
 
   for (const auto& input : inputs) {
@@ -470,7 +473,9 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
 
   post(stream, work);
 
-  work->xcclEndEvent_->record(stream);
+  if (!coalescing_state_) {
+    work->xcclEndEvent_->record(stream);
+  }
 
   std::vector<c10::Stream> streams = {stream.unwrap()};
   c10::MultiStreamGuard streamGuard(streams);
@@ -549,6 +554,8 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
   work = initWork(device, rank_, opType);
 
   work->outputs_ = std::make_shared<std::vector<at::Tensor>>(outputs);
+
+  at::xpu::OptionalXPUGuard gpuGuard(device);
 
   {
     AutoXcclGroup xccl_group_guard;
