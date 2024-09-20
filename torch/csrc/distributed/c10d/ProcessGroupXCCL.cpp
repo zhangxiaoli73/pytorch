@@ -10,7 +10,6 @@
 #include <tuple>
 #include <unordered_set>
 #include <utility>
-#include <variant>
 
 #include <ATen/detail/FunctionTraits.h>
 #include <c10/core/DeviceType.h>
@@ -458,29 +457,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
 
   work = initWork(device, rank_, opType);
 
-  { // Do we need to store the result of the operation?
-    std::variant<std::vector<at::Tensor>, std::vector<std::vector<at::Tensor>>>
-        outputs;
-    std::visit(
-        [&work](auto&& outputData) {
-          using T = std::decay_t<decltype(outputData)>;
-
-          if constexpr (std::is_same_v<T, std::vector<at::Tensor>>) {
-            work->outputs_ = std::make_shared<std::vector<at::Tensor>>(
-                std::move(outputData));
-          } else if constexpr (std::is_same_v<
-                                   T,
-                                   std::vector<std::vector<at::Tensor>>>) {
-            std::vector<at::Tensor> flattened;
-            for (auto& vec : outputData) {
-              flattened.insert(flattened.end(), vec.begin(), vec.end());
-            }
-            work->outputs_ =
-                std::make_shared<std::vector<at::Tensor>>(std::move(flattened));
-          }
-        },
-        outputs);
-  }
+  work->outputs_ = std::make_shared<std::vector<at::Tensor>>(outputs);
 
   pre(stream, work);
 
