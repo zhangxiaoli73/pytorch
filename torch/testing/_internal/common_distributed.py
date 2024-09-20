@@ -326,7 +326,7 @@ def requires_xccl():
         not c10d.is_xccl_available(),
         "c10d was not compiled with the XCCL backend",
     )
-    
+
 def requires_ucc():
     return skip_but_pass_in_sandcastle_if(
         not c10d.is_ucc_available(),

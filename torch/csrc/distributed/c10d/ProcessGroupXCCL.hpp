@@ -48,12 +48,13 @@ int getXCCLEnvVar(std::string envVarName) {
   }
 }
 
-void setXCCLEnvVar(std::string envVarName, int val) {
-  setenv(envVarName.c_str(), std::to_string(val).c_str(), val);
-}
-
-void setXCCLEnvVar(std::string envVarName, std::string val) {
-  setenv(envVarName.c_str(), val.c_str(), 1);
+template <typename T>
+void setXCCLEnvVar(const std::string& envVarName, T val) {
+  if constexpr (std::is_same_v<T, int>) {
+    setenv(envVarName.c_str(), std::to_string(val).c_str(), 1);
+  } else if constexpr (std::is_same_v<T, std::string>) {
+    setenv(envVarName.c_str(), val.c_str(), 1);
+  }
 }
 
 bool with_mpirun() {

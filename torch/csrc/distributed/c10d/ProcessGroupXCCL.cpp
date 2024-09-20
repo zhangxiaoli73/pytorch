@@ -68,7 +68,7 @@ XCCL_KVS get_kvs(int rank, c10d::Store& store) {
   std::lock_guard<std::mutex> lock(kvs_mutex);
   if (kvs)
     return kvs;
-  std::string storeKey = "ccl_kvs";
+  std::string storeKey = "xccl_kvs";
 
   // Rank 0 broadcast the bootstrap network information to other ranks
   if (rank == 0) {
