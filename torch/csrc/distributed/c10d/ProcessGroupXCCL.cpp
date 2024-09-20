@@ -733,6 +733,10 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::gather(
           return ret_evt;
         }
       },
+      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
+      },
+      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
+      },
       OpType::GATHER);
 }
 
@@ -833,6 +837,10 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::scatter(
 
           return ret_evt;
         }
+      },
+      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
+      },
+      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
       },
       OpType::SCATTER);
 }
@@ -1544,6 +1552,10 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall(
 
         stream.synchronize();
         return ret_evt;
+      },
+      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
+      },
+      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
       },
       OpType::ALLTOALL);
 }
