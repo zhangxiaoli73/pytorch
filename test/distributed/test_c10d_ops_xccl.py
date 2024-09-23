@@ -758,51 +758,50 @@ class ProcessGroupXCCLOpTest(MultiProcContinousTest):
                     torch.tensor([(j + 1) * self.world_size]), tensors_list[i - 1][j]
                 )
 
-    # TODO: wait send/recv
-    # @requires_xccl()
-    # @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
-    # def test_send_recv(self):
-    #     pg = self.pg
-    #     device = self.rank_to_GPU[self.rank][0]
+    @requires_xccl()
+    @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
+    def test_send_recv(self):
+        pg = self.pg
+        device = self.rank_to_GPU[self.rank][0]
 
-    #     # Generate the same random tensor
-    #     torch.manual_seed(0)
-    #     send_tensor = torch.rand(10, 10, device=device)
-    #     if self.rank == 0:
-    #         dist.send(send_tensor, 1)
-    #     if self.rank == 1:
-    #         recv_tensor = torch.rand(10, 10, device=device)
-    #         dist.recv(recv_tensor, 0)
-    #         self.assertEqual(send_tensor, recv_tensor)
+        # Generate the same random tensor
+        torch.manual_seed(0)
+        send_tensor = torch.rand(10, 10, device=device)
+        if self.rank == 0:
+            dist.send(send_tensor, 1)
+        if self.rank == 1:
+            recv_tensor = torch.rand(10, 10, device=device)
+            dist.recv(recv_tensor, 0)
+            self.assertEqual(send_tensor, recv_tensor)
 
-    # @requires_xccl()
-    # @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
-    # def test_send_recv_complex(self):
-    #     pg = self.pg
-    #     device = self.rank_to_GPU[self.rank][0]
+    @requires_xccl()
+    @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
+    def test_send_recv_complex(self):
+        pg = self.pg
+        device = self.rank_to_GPU[self.rank][0]
 
-    #     # Generate the same random tensor
-    #     torch.manual_seed(0)
-    #     send_tensor = torch.rand(10, 10, dtype=torch.cfloat, device=device)
-    #     if self.rank == 0:
-    #         dist.send(send_tensor, 1)
-    #     if self.rank == 1:
-    #         recv_tensor = torch.rand(10, 10, dtype=torch.cfloat, device=device)
-    #         dist.recv(recv_tensor, 0)
-    #         self.assertEqual(send_tensor, recv_tensor)
+        # Generate the same random tensor
+        torch.manual_seed(0)
+        send_tensor = torch.rand(10, 10, dtype=torch.cfloat, device=device)
+        if self.rank == 0:
+            dist.send(send_tensor, 1)
+        if self.rank == 1:
+            recv_tensor = torch.rand(10, 10, dtype=torch.cfloat, device=device)
+            dist.recv(recv_tensor, 0)
+            self.assertEqual(send_tensor, recv_tensor)
 
-    # @requires_xccl()
-    # @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
-    # def test_send_recv_object_list(self):
-    #     device = self.rank_to_GPU[self.rank][0]
+    @requires_xccl()
+    @skip_but_pass_in_sandcastle_if(not TEST_MULTIGPU, "XCCL test requires 2+ GPUs")
+    def test_send_recv_object_list(self):
+        device = self.rank_to_GPU[self.rank][0]
 
-    #     val = 99 if self.rank == 0 else None
-    #     object_list = [val] * self.world_size
-    #     if self.rank == 0:
-    #         dist.send_object_list(object_list, 1, device=device)
-    #     if self.rank == 1:
-    #         dist.recv_object_list(object_list, 0, device=device)
-    #         self.assertEqual(object_list[0], 99)
+        val = 99 if self.rank == 0 else None
+        object_list = [val] * self.world_size
+        if self.rank == 0:
+            dist.send_object_list(object_list, 1, device=device)
+        if self.rank == 1:
+            dist.recv_object_list(object_list, 0, device=device)
+            self.assertEqual(object_list[0], 99)
 
 
 if __name__ == "__main__":

@@ -155,7 +155,10 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
   std::shared_ptr<xcclComm_t> getXCCLComm(
       const std::string& deviceKey,
-      at::Device& device);
+      at::Device& device,
+      OpType opType,
+      int p2pRank = 0,
+      bool isSendRecvSelf = false);
 
   virtual c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> initWork(
       at::Device& device,
@@ -195,6 +198,22 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       std::vector<at::Tensor>& output,
       Fn fn,
       OpType opType);
+
+  template <typename Fn>
+  c10::intrusive_ptr<Work> pointToPoint(
+      at::Tensor& tensor,
+      Fn fn,
+      int peer,
+      OpType opType);
+
+  template <typename Fn, typename PreProcess, typename PostProcess>
+  c10::intrusive_ptr<Work> pointToPoint(
+      at::Tensor& tensor,
+      Fn fn,
+      int peer,
+      OpType opType,
+      PreProcess pre,
+      PostProcess post);
 
   c10::intrusive_ptr<Work> allreduce_impl(
       at::Tensor& tensor,
@@ -282,16 +301,12 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   c10::intrusive_ptr<Work> send(
       std::vector<at::Tensor>& tensors,
       int dstRank,
-      int tag) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::send not implemented");
-  }
+      int tag) override;
 
   c10::intrusive_ptr<Work> recv(
       std::vector<at::Tensor>& tensors,
       int srcRank,
-      int tag) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::recv not implemented");
-  }
+      int tag) override;
 
   void groupStart();
 
@@ -309,6 +324,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
  protected:
   std::unordered_map<std::string, at::xpu::XPUStream> xcclStreams_;
+  std::unordered_map<std::string, at::xpu::XPUEvent> xcclEvents_;
   std::unordered_map<std::string, std::shared_ptr<xcclComm_t>>
       inInitializationCommMap_;
   std::unordered_map<std::string, std::shared_ptr<xcclComm_t>> devXCCLCommMap_;

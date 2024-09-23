@@ -228,6 +228,14 @@ ccl::reduction getXcclReduceOp(const ReduceOp& reduceOp, at::Tensor& input) {
   }
 }
 
+void syncStream(
+    at::Device& device,
+    at::xpu::XPUEvent& xcclEvent,
+    at::xpu::XPUStream& xcclStream) {
+  xcclEvent.record(at::xpu::getCurrentXPUStream(device.index()));
+  xcclEvent.block(xcclStream);
+}
+
 bool complexViewAsRealAllowed(const ReduceOp reduceOp) {
   switch (reduceOp) {
     case ReduceOp::SUM:
@@ -245,9 +253,6 @@ bool complexViewAsRealAllowed(const ReduceOp reduceOp) {
 static std::mutex xcclCommDevIdxMapMutex;
 static std::unordered_map<std::shared_ptr<xcclComm_t>, int> xcclCommDevIdxMap;
 constexpr int64_t kSynchronizeBusyWaitMillis = 10;
-
-// Before implementing send/recv, the xcclActiveGroupCounter_ variable has no
-// effect.
 thread_local uint64_t ProcessGroupXCCL::xcclActiveGroupCounter_ = 0;
 
 ProcessGroupXCCL::WorkXCCL::WorkXCCL(
@@ -369,7 +374,10 @@ c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> ProcessGroupXCCL::initWork(
 
 std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
     const std::string& deviceKey,
-    at::Device& device) {
+    at::Device& device,
+    OpType opType,
+    int p2pRank,
+    bool isSendRecvSelf) {
   if (deviceKey.empty()) {
     C10_THROW_ERROR(
         DistBackendError,
@@ -387,12 +395,29 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   }
 
   std::shared_ptr<xcclComm_t> XCCLComm;
-
   XCCL_KVS kvs = get_kvs(rank_, *store_);
 
+  bool batchP2P = xcclActiveGroupCounter_ > 0;
+  bool singleP2POp = isP2POp(opType, batchP2P);
+
+  at::xpu::OptionalXPUGuard gpuGuard(device);
+
+  for (const auto i : c10::irange(xcclActiveGroupCounter_)) {
+    (void)i;
+    ccl::group_end();
+  }
+
   int numRanks, rank;
-  numRanks = getSize();
-  rank = getRank();
+  if (!singleP2POp) {
+    numRanks = getSize();
+    rank = getRank();
+  } else if (isSendRecvSelf) {
+    numRanks = 1;
+    rank = 0;
+  } else {
+    numRanks = 2;
+    rank = p2pRank;
+  }
 
   c10::impl::VirtualGuardImpl impl(device.type());
   c10::Stream stream = impl.getStream(device);
@@ -410,7 +435,13 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
     inInitializationCommMap_.emplace(deviceKey, XCCLComm);
   }
 
+  for (const auto i : c10::irange(xcclActiveGroupCounter_)) {
+    (void)i;
+    ccl::group_start();
+  }
+
   xcclStreams_.emplace(deviceKey, std::move(stream));
+  xcclEvents_.emplace(deviceKey, at::xpu::XPUEvent());
 
   auto it = inInitializationCommMap_.find(deviceKey);
   if (it != inInitializationCommMap_.end()) {
@@ -440,7 +471,7 @@ void ProcessGroupXCCL::groupEnd() {
 }
 
 // TODO: wait p2p enable
-static constexpr int CoalActive = 0x01, CoalColl = 0x02;
+static constexpr int CoalActive = 0x01, CoalColl = 0x02, CoalP2P = 0x04;
 void ProcessGroupXCCL::startCoalescing() {
   coalescedDevice_.set_index(-1);
   coalescedComm_ = nullptr;
@@ -496,7 +527,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
 
   auto device = inputs[0].device();
   const auto key = std::to_string(device.index());
-  auto comm = getXCCLComm(key, device);
+  auto comm = getXCCLComm(key, device, opType);
 
   if (coalescing_state_ & CoalActive) {
     coalescing_state_ |= CoalColl;
@@ -514,9 +545,9 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   }
 
   auto stream = xcclStreams_.at(key);
+  syncStream(device, xcclEvents_[key], stream);
 
   c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
-
   work = initWork(device, rank_, opType);
 
   work->outputs_ = std::make_shared<std::vector<at::Tensor>>(outputs);
@@ -591,7 +622,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
 
   auto device = inputs[0].device();
   const auto key = std::to_string(device.index());
-  auto comm = getXCCLComm(key, device);
+  auto comm = getXCCLComm(key, device, opType);
 
   if (coalescing_state_ & CoalActive) {
     coalescing_state_ |= CoalColl;
@@ -609,9 +640,9 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
   }
 
   auto stream = xcclStreams_.at(key);
+  syncStream(device, xcclEvents_[key], stream);
 
   c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
-
   work = initWork(device, rank_, opType);
 
   work->outputs_ = std::make_shared<std::vector<at::Tensor>>(outputs);
@@ -638,6 +669,177 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
   work->blockingWait_ = blockingWait_;
 
   return work;
+}
+
+template <typename Fn, typename PreProcess, typename PostProcess>
+c10::intrusive_ptr<Work> ProcessGroupXCCL::pointToPoint(
+    at::Tensor& tensor,
+    Fn fn,
+    int peer,
+    OpType opType,
+    PreProcess pre,
+    PostProcess post) {
+  using traits = function_traits<Fn>;
+  using attr_t = typename traits::template arg<1>::type;
+  attr_t attr = ccl::create_operation_attr<attr_t>();
+
+  auto device = tensor.device();
+  std::string key;
+  int p2pRank = 0, p2pTargetRank = 0;
+  bool isSendRecvSelf = false;
+
+  bool batchP2P = xcclActiveGroupCounter_ > 0;
+  if (batchP2P) {
+    key = std::to_string(device.index());
+    p2pRank = rank_;
+    p2pTargetRank = peer;
+  } else {
+    int lowRank = rank_ < peer ? rank_ : peer;
+    int highRank = rank_ < peer ? peer : rank_;
+    key = std::to_string(lowRank) + ":" + std::to_string(highRank);
+    p2pRank = rank_ <= peer ? 0 : 1;
+    isSendRecvSelf = rank_ == peer;
+    p2pTargetRank = isSendRecvSelf ? 0 : 1 - p2pRank;
+  }
+
+  auto comm = getXCCLComm(key, device, opType, p2pRank, isSendRecvSelf);
+
+  if (coalescing_state_ & CoalActive) {
+    coalescing_state_ |= CoalP2P;
+    if (coalescedDevice_.index() < 0) {
+      coalescedDevice_ = device;
+    } else {
+      TORCH_CHECK(
+          coalescedDevice_.index() == device.index(), MULTI_DEVICE_ERROR_MSG);
+    }
+    if (coalescedComm_ == nullptr) {
+      coalescedComm_ = comm;
+    } else {
+      TORCH_CHECK(coalescedComm_ == comm, MULTI_DEVICE_ERROR_MSG);
+    }
+  }
+
+  auto stream = xcclStreams_.at(key);
+  syncStream(device, xcclEvents_[key], stream);
+
+  c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
+  if (!coalescing_state_) {
+    work = initWork(device, rank_, opType);
+    work->outputs_ = std::make_shared<std::vector<at::Tensor>>();
+    work->outputs_->push_back(tensor);
+  }
+
+  at::xpu::OptionalXPUGuard gpuGuard(device);
+
+  if (!coalescing_state_) {
+    pre(stream, work);
+  }
+
+  c10::xpu::XPUCachingAllocator::recordStream(
+      tensor.storage().data_ptr(), stream);
+
+  fn(tensor, attr, *comm, stream, p2pTargetRank);
+
+  if (!coalescing_state_) {
+    post(stream);
+
+    work->xcclEndEvent_->record(stream);
+    work->blockingWait_ = blockingWait_;
+
+    {
+      std::vector<c10::Stream> streams = {stream.unwrap()};
+      c10::MultiStreamGuard streamGuard(streams);
+      std::vector<at::Device> devices{device};
+      work->future_ = c10::make_intrusive<at::ivalue::Future>(
+          c10::ListType::create(c10::TensorType::get()), devices);
+      work->future_->markCompleted(at::IValue(*work->outputs_));
+    }
+    return work;
+  } else {
+    return nullptr;
+  }
+}
+
+template <typename Fn>
+c10::intrusive_ptr<Work> ProcessGroupXCCL::pointToPoint(
+    at::Tensor& tensor,
+    Fn fn,
+    int peer,
+    OpType opType) {
+  return pointToPoint(
+      tensor,
+      fn,
+      peer,
+      opType,
+      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
+      },
+      [](at::xpu::XPUStream&) {});
+}
+
+c10::intrusive_ptr<Work> ProcessGroupXCCL::send(
+    std::vector<at::Tensor>& tensors,
+    int dstRank,
+    int /* unused */) {
+  TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
+  // @lint-ignore CLANGTIDY
+  auto tensor = tensors.back();
+  check_xpu_single_tensor(tensor, true);
+
+  auto ret = pointToPoint(
+      tensor,
+      [&](at::Tensor& input,
+          ccl::pt2pt_attr attr,
+          xcclComm_t& comm,
+          at::xpu::XPUStream& stream,
+          int dst) {
+        ccl::event ret_evt;
+        auto xcclDataType = getXcclDataType(input.scalar_type());
+        ret_evt = ccl::send(
+            input.data_ptr(),
+            (size_t)input.numel(),
+            xcclDataType,
+            dst,
+            comm,
+            ccl::create_stream(stream.queue()),
+            attr);
+        return ret_evt;
+      },
+      dstRank,
+      OpType::SEND);
+  return ret;
+}
+
+c10::intrusive_ptr<Work> ProcessGroupXCCL::recv(
+    std::vector<at::Tensor>& tensors,
+    int srcRank,
+    int /* unused */) {
+  TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
+  // @lint-ignore CLANGTIDY
+  auto tensor = tensors.back();
+  check_xpu_single_tensor(tensor, true);
+
+  auto ret = pointToPoint(
+      tensor,
+      [&](at::Tensor& output,
+          ccl::pt2pt_attr attr,
+          xcclComm_t& comm,
+          at::xpu::XPUStream& stream,
+          int src) {
+        ccl::event ret_evt;
+        auto xcclDataType = getXcclDataType(output.scalar_type());
+        ret_evt = ccl::recv(
+            output.data_ptr(),
+            (size_t)output.numel(),
+            xcclDataType,
+            src,
+            comm,
+            ccl::create_stream(stream.queue()),
+            attr);
+        return ret_evt;
+      },
+      srcRank,
+      OpType::RECV);
+  return ret;
 }
 
 c10::intrusive_ptr<Work> ProcessGroupXCCL::gather(
