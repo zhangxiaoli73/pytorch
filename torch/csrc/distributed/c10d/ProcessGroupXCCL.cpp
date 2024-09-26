@@ -75,15 +75,6 @@ XCCL_KVS get_kvs(int rank, c10d::Store& store) {
   return kvs;
 }
 
-void check_xpu_single_tensor(const at::Tensor& tensor) {
-  if (!tensor.is_xpu() || tensor.is_sparse()) {
-    C10_THROW_ERROR(ValueError, "Tensors must be XPU and dense");
-  }
-  if (!tensor.is_contiguous(tensor.suggest_memory_format())) {
-    C10_THROW_ERROR(ValueError, "Tensors must be contiguous");
-  }
-}
-
 ccl::datatype getXcclDataType(at::ScalarType type) {
   auto it = xcclDatatypes.find(type);
   TORCH_CHECK_WITH(
@@ -106,23 +97,7 @@ ccl::reduction getXcclReduceOp(const ReduceOp& reduceOp, at::Tensor& input) {
     }
     return xcclOps.at(reduceOp);
   } catch (const std::out_of_range&) {
-    switch (reduceOp) {
-      case ReduceOp::AVG:
-        C10_THROW_ERROR(ValueError, "Cannot use ReduceOp AVG with XCCL");
-        break;
-      case ReduceOp::BAND:
-        C10_THROW_ERROR(ValueError, "Cannot use ReduceOp.BAND with XCCL");
-        break;
-      case ReduceOp::BOR:
-        C10_THROW_ERROR(ValueError, "Cannot use ReduceOp.BOR with XCCL");
-        break;
-      case ReduceOp::BXOR:
-        C10_THROW_ERROR(ValueError, "Cannot use ReduceOp.BXOR with XCCL");
-        break;
-      default:
-        C10_THROW_ERROR(ValueError, "Unhandled ReduceOp");
-        break;
-    }
+    C10_THROW_ERROR(ValueError, "Unhandled ReduceOp");
   }
 }
 
@@ -137,7 +112,7 @@ ProcessGroupXCCL::WorkXCCL::WorkXCCL(
     int rank,
     OpType opType,
     const std::optional<std::vector<at::Tensor>>& inputs)
-    : Work(rank, opType, "profilingTitle", inputs),
+    : WorkGCCL(rank, opType, "profilingTitle", inputs),
       device_(device),
       workStartTime_(std::chrono::steady_clock::now()) {
   unsigned char enable_timing = 0;
@@ -153,64 +128,11 @@ ProcessGroupXCCL::WorkXCCL::WorkXCCL(const WorkXCCL& w)
 
 ProcessGroupXCCL::WorkXCCL::~WorkXCCL() = default;
 
-bool ProcessGroupXCCL::WorkXCCL::checkTimeout(
-    std::optional<std::chrono::milliseconds> timeout) {
-  auto currentTimepoint = std::chrono::steady_clock::now();
-  auto timeElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-      currentTimepoint - workStartTime_);
-  std::chrono::milliseconds opTimeout = std::chrono::milliseconds(60000);
-
-  auto workTimeout = timeout ? *timeout : opTimeout;
-
-  if (timeElapsed < workTimeout)
-    return false;
-  return true;
-}
-
-bool ProcessGroupXCCL::WorkXCCL::isCompleted() {
-  if (xcclEndEvent_ && xcclEndEvent_->query()) {
-    return true;
-  }
-  return false;
-}
-
-void ProcessGroupXCCL::WorkXCCL::synchronize() {
-  synchronizeInternal(kNoTimeout);
-}
-
-void ProcessGroupXCCL::WorkXCCL::synchronizeStream() {
-  auto currentStream = at::xpu::getCurrentXPUStream(device_.index());
-  // Block the current stream on the XCCL stream
-  xcclEndEvent_->block(currentStream);
-}
-
-void ProcessGroupXCCL::WorkXCCL::synchronizeInternal(
-    std::chrono::milliseconds timeout) {
-  synchronizeStream();
-
-  if (blockingWait_) {
-    while (!isCompleted()) {
-      bool timedOut = checkTimeout(
-          timeout == kNoTimeout ? std::nullopt : std::make_optional(timeout));
-      if (timedOut) {
-        break;
-      }
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(kSynchronizeBusyWaitMillis));
-    }
-  }
-}
-
-bool ProcessGroupXCCL::WorkXCCL::wait(std::chrono::milliseconds timeout) {
-  synchronizeInternal(timeout);
-  return true;
-}
-
 ProcessGroupXCCL::ProcessGroupXCCL(
     const c10::intrusive_ptr<Store>& store,
     int rank,
     int size)
-    : Backend(rank, size), store_(store) {
+    : ProcessGroupGCCL(rank, size), store_(store) {
   blockingWait_ = getCvarBool(TORCH_XCCL_BLOCKING_WAIT, false);
   init();
 
@@ -264,8 +186,8 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   XCCL_KVS kvs = get_kvs(rank_, *store_);
 
   int numRanks, rank;
-  numRanks = getSize();
-  rank = getRank();
+  numRanks = this->getSize();
+  rank = this->getRank();
 
   c10::impl::VirtualGuardImpl impl(device.type());
   c10::Stream stream = impl.getStream(device);
@@ -302,33 +224,123 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   return it->second;
 }
 
-template <typename Fn, typename PreProcess, typename PostProcess>
-c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
-    at::Tensor& input,
-    at::Tensor& output,
+
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::allreduceImpl(at::Tensor& input,
+    at::Tensor& output, ncclComm_t comm, c10::Stream& stream) {
+    auto xcclDataType = getXcclDataType(input.scalar_type());
+    auto xcclReduceOp = getXcclReduceOp(opts.reduceOp, input);
+    ccl::event ret_evt;
+    ret_evt = ccl::allreduce(
+        input.data_ptr(),
+        output.data_ptr(),
+        (size_t)input.numel(),
+        xcclDataType,
+        xcclReduceOp,
+        comm,
+        stream,
+        attr);
+    return ncclSuccess;
+}
+
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::broadcastImpl(at::Tensor& input,
+    at::Tensor& output, ncclComm_t comm, c10::Stream& stream) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::reduceImpl(at::Tensor& input,
+    at::Tensor& output, ncclComm_t comm, c10::Stream& stream) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::allgatherImpl(at::Tensor& input,
+    at::Tensor& output, ncclComm_t comm, c10::Stream& stream) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::reducescatterImpl(at::Tensor& input,
+    at::Tensor& output, ncclComm_t comm, c10::Stream& stream) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::all2allImpl(at::Tensor& input,
+    at::Tensor& output, ncclComm_t comm, c10::Stream& stream) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::sendImpl(at::Tensor& input,
+    ncclComm_t comm, c10::Stream& stream, int dst) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::recvImpl(at::Tensor& output,
+    ncclComm_t comm, c10::Stream& stream, int dst) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::gatherImpl(at::Tensor& output,
+    ncclComm_t comm, c10::Stream& stream, int dst) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::scatterImpl(at::Tensor& input,
+    at::Tensor& output, ncclComm_t comm, c10::Stream& stream) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::groupStartImpl(std::shared_ptr<NCCLComm> comm) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::groupEndImpl() {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::dataTypes {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+ncclResult_t ProcessGroupXCCL::CollectivesXCCLImpl::reductionTypes {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+
+template <typename Fn>
+c10::intrusive_ptr<Work> collectiveCoalesced(
+    std::vector<at::Tensor>& input,
+    std::vector<at::Tensor>& output,
     Fn fn,
+    OpType opType,
+    const char* profilingTitle = nullptr,
+    bool avoidRecordStreams = false) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+
+template <typename Fn, typename PreProcess, typename PostProcess>
+c10::intrusive_ptr<Work> pointToPoint(
+    at::Tensor& tensor,
+    Fn fn,
+    int peer,
+    OpType opType,
     PreProcess pre,
     PostProcess post,
-    OpType opType) {
+    const char* profilingTitle = nullptr) {
+    TORCH_CHECK(false, "ProcessGroupXCCL allreduce not implemented");
+}
+
+template <typename Fn, typename PreProcess, typename PostProcess>
+  c10::intrusive_ptr<Work> collective(
+      std::vector<at::Tensor>& inputs,
+      std::vector<at::Tensor>& outputs,
+      Fn fn,
+      PreProcess pre,
+      PostProcess post,
+      OpType opType,
+      const char* profilingTitle = nullptr,
+      bool avoidRecordStreams = false,
+      bool nanCheck = true) {
   using traits = function_traits<Fn>;
   using attr_t = typename traits::template arg<2>::type;
   attr_t attr = ccl::create_operation_attr<attr_t>();
 
-  auto device = input.device();
+  auto device = inputs[0].device();
   const auto key = std::to_string(device.index());
   auto comm = getXCCLComm(key, device);
 
   auto stream = xcclStreams_.at(key);
-  std::vector<at::Tensor> outputs{output};
 
   c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
 
   work = initWork(device, rank_, opType);
 
-  work->outputs_ =
-      std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
-  c10::xpu::XPUCachingAllocator::recordStream(
-      input.storage().data_ptr(), stream);
+  work->outputs_ = std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
+  c10::xpu::XPUCachingAllocator::recordStream(input.storage().data_ptr(), stream);
 
   auto ccl_stream = ccl::create_stream(stream.queue());
 
@@ -345,55 +357,6 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   work->blockingWait_ = blockingWait_;
 
   return work;
-}
-
-template <typename Fn>
-c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
-    at::Tensor& input,
-    at::Tensor& output,
-    Fn fn,
-    OpType opType) {
-  return collective<Fn>(
-      input,
-      output,
-      fn,
-      [](at::xpu::XPUStream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-      [](at::xpu::XPUStream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-      opType);
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
-    std::vector<at::Tensor>& tensors,
-    const AllreduceOptions& opts) {
-  TORCH_CHECK(
-      tensors.size() == 1, "Expecting one tensor only but got multiple");
-  auto tensor = tensors.back();
-  check_xpu_single_tensor(tensor);
-  return collective(
-      tensor,
-      tensor,
-      [&](at::Tensor& input,
-          at::Tensor& output,
-          ccl::allreduce_attr attr,
-          xcclComm_t& comm,
-          ccl::stream& stream) {
-        auto xcclDataType = getXcclDataType(input.scalar_type());
-        auto xcclReduceOp = getXcclReduceOp(opts.reduceOp, input);
-        ccl::event ret_evt;
-        ret_evt = ccl::allreduce(
-            input.data_ptr(),
-            output.data_ptr(),
-            (size_t)input.numel(),
-            xcclDataType,
-            xcclReduceOp,
-            comm,
-            stream,
-            attr);
-        return ret_evt;
-      },
-      OpType::ALLREDUCE);
 }
 
 } // namespace c10d

@@ -705,6 +705,7 @@ libtorch_cuda_sources = libtorch_cuda_core_sources + libtorch_cuda_distributed_s
 
 libtorch_xpu_distributed_extra_sources = [
     "torch/csrc/distributed/c10d/ProcessGroupXCCL.cpp",
+    "torch/csrc/distributed/c10d/ProcessGroupGCCL.cpp",
 ]
 
 torch_cpp_srcs = [
