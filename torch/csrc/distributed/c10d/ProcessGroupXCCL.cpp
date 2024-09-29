@@ -1,29 +1,28 @@
-#ifdef USE_C10D_XCCL
-
-#include <exception>
+#include <torch/csrc/distributed/c10d/ProcessGroupXCCL.hpp>
 #include <fstream>
-#include <map>
 #include <mutex>
 #include <sstream>
+
+#ifdef USE_C10D_XCCL
+#include <exception>
+#include <map>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_set>
 #include <utility>
 
+#include <ATen/detail/FunctionTraits.h>
 #include <c10/core/DeviceType.h>
 #include <c10/util/CallOnce.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
-#include <c10/util/WaitCounter.h>
+#include <c10/util/Optional.h>
 #include <c10/util/irange.h>
 #include <torch/csrc/distributed/c10d/ParamCommsUtils.hpp>
-#include <torch/csrc/distributed/c10d/PrefixStore.hpp>
-#include <torch/csrc/distributed/c10d/ProcessGroupXCCL.hpp>
 #include <torch/csrc/distributed/c10d/TraceUtils.h>
 #include <torch/csrc/distributed/c10d/Utils.hpp>
 #include <torch/csrc/distributed/c10d/logger.hpp>
 #include <torch/torch.h>
-#include <optional>
 
 namespace c10d {
 
@@ -126,6 +125,7 @@ ccl::reduction getXcclReduceOp(const ReduceOp& reduceOp, at::Tensor& input) {
         break;
     }
   }
+}
 // Get a key string from device
 inline std::string getKeyFromDevice(at::Device& device) {
   return std::to_string(device.index());
@@ -178,11 +178,10 @@ void syncStream(
 // - This map has also to be maintained as global variable since the register
 //   hooks are called outside the scope of any PG, thus we need traverse
 //   communicators in all PGs.
-static std::unordered_map<std::shared_ptr<NCCLComm>, int> ncclCommDevIdxMap;
+static std::unordered_map<std::shared_ptr<void*>, int> ncclCommDevIdxMap;
 static std::mutex ncclCommDevIdxMapMutex;
 static bool allocatorHooksAttached = false;
 
-const int64_t ProcessGroupXCCL::kWatchdogThreadSleepMillis = 100;
 constexpr int64_t kSynchronizeBusyWaitMillis = 10;
 thread_local uint64_t ProcessGroupXCCL::ncclActiveGroupCounter_ = 0;
 
@@ -190,19 +189,6 @@ std::ostream& operator<<(
     std::ostream& output,
     const ProcessGroupXCCL::WorkXCCL& WorkXCCL) {
   std::string workInfo;
-  workInfo = c10::str(
-      "WorkXCCL(",
-      "SeqNum=",
-      WorkXCCL.seq_,
-      ", OpType=",
-      opTypeToString(WorkXCCL.opType_),
-      ", NumelIn=",
-      WorkXCCL.numelIn_,
-      ", NumelOut=",
-      WorkXCCL.numelOut_,
-      ", Timeout(ms)=",
-      WorkXCCL.opTimeout_.count(),
-      ")");
   return output << workInfo;
 }
 
@@ -215,9 +201,7 @@ ProcessGroupXCCL::WorkXCCL::WorkXCCL(
     uint64_t seq,
     const char* profilingTitle,
     const std::optional<std::vector<at::Tensor>>& inputs,
-    bool desyncDebug,
     bool enableTiming,
-    bool cudaEventCacheEnabled,
     DebugLevel distDebugLevel)
     : Work(rank, opType, profilingTitle, inputs),
       pgUID_(pgUID),
@@ -259,7 +243,6 @@ ProcessGroupXCCL::WorkXCCL::WorkXCCL(const WorkXCCL& w)
       cclComm_(w.cclComm_),
       blockingWait_(w.blockingWait_),
       opTimeout_(w.opTimeout_),
-      ownedEphermeralTimeout_(w.ownedEphermeralTimeout_),
       workStartTime_(w.workStartTime_),
       seq_(w.seq_),
       startTraceUpdated_(w.startTraceUpdated_),
@@ -268,74 +251,23 @@ ProcessGroupXCCL::WorkXCCL::WorkXCCL(const WorkXCCL& w)
       store_(w.store_),
       timingEnabled_(w.timingEnabled_),
       trace_id_(w.trace_id_),
-      distDebugLevel_(w.distDebugLevel_),
-      exception_ = w.exception_;
-       {}
+      distDebugLevel_(w.distDebugLevel_) {
+       exception_ = w.exception_;
+    }
 
 ProcessGroupXCCL::WorkXCCL::~WorkXCCL() = default;
 
 bool ProcessGroupXCCL::WorkXCCL::isCompleted() {
-  if (isAborted()) {
-    checkAndSetException();
-  }
-  return exception() || finishedGPUExecutionInternal();
+    return true;
 }
-
 
 bool ProcessGroupXCCL::WorkXCCL::isSuccess() const {
   C10_THROW_ERROR(NotImplementedError, "Work::isSuccess() is deprecated");
 }
 
-void ProcessGroupXCCL::WorkXCCL::checkAndSetException() {
-  if (exception()) {
-    // We already have an exception.
-    return;
-  }
-
-  auto exception_ptr = checkForNCCLErrors();
-  std::unique_lock<std::mutex> lock(mutex_);
-  exception_ = exception_ptr;
-  if (exception_) {
-    LOG(ERROR) << logPrefix() << "Collective " << *this
-               << " raised the following async exception: "
-               << getExceptionMsgFromExceptionPtr(exception_);
-  }
-}
-
 const std::string& ProcessGroupXCCL::WorkXCCL::logPrefix() const {
   static std::string prefix = c10::str("[Rank ", rank_, "] ");
   return prefix;
-}
-
-void ProcessGroupXCCL::WorkXCCL::setException(
-    std::exception_ptr exception_ptr) {
-  std::unique_lock<std::mutex> lock(mutex_);
-  exception_ = exception_ptr;
-}
-
-// Helper that checks if the NCCL kernels are completed on the GPUs
-bool ProcessGroupXCCL::WorkXCCL::finishedGPUExecution() {
-  checkAndSetException();
-  return finishedGPUExecutionInternal();
-}
-
-bool ProcessGroupXCCL::WorkXCCL::startedGPUExecutionInternal() const {
-  // if timing is disabled we won't have allocated start events
-  if (!timingEnabled_) {
-    return false;
-  }
-  // Checking the work's corresponding CUDA event's status
-  if (!ncclStartEvent_->query()) {
-    return false;
-  }
-  return true;
-}
-
-bool ProcessGroupXCCL::WorkXCCL::finishedGPUExecutionInternal() const {
-  if (!ncclEndEvent_->query()) {
-    return false;
-  }
-  return true;
 }
 
 bool ProcessGroupXCCL::WorkXCCL::checkTimeout(
@@ -437,7 +369,7 @@ void ProcessGroupXCCL::WorkXCCL::synchronizeInternal(
     // exception() includes timeout and error during blocking wait
     if (exception()) {
       // Abort NCCL communicators
-      abort();
+     this->abort();
       // Throw exception (from main thread here)
       handleException(TearDown);
     }
@@ -496,7 +428,7 @@ bool ProcessGroupXCCL::WorkXCCL::wait(std::chrono::milliseconds timeout) {
 
 void ProcessGroupXCCL::WorkXCCL::abort() {
   // Abort all communicators of this work
-  ncclCommAbort(cclComm_);
+//  ncclCommAbort(cclComm_);
 
   ncclCommDevIdxMapMutex.lock();
   ncclCommDevIdxMap.erase(cclComm_);
@@ -521,11 +453,9 @@ ProcessGroupXCCL::ProcessGroupXCCL(
       store_(store),
       options_(options),
       ncclCommCounter_(0),
-      traceKeyStart_(getTraceStartKey("XCCL", rank)),
-      traceKeyEnd_(getTraceEndKey("XCCL", rank)),
       terminateProcessGroup_(false),
       collectiveDebugInfoMode_(false),
-      local_id_(process_group_id++)) {
+      local_id_(process_group_id++) {
   init();
    // Intel oneCCL requires passing CCL_LOCAL_RANK and CCL_LOCAL_SIZE for non-MPI
   // launchers.
@@ -541,7 +471,6 @@ ProcessGroupXCCL::ProcessGroupXCCL(
     setXCCLEnvVar("CCL_LOCAL_SIZE", local_world_size);
   }
 }
-
 
 void ProcessGroupXCCL::setSequenceNumberForGroup() {
 } // NCCL just starts sequence numbers at 0.
@@ -567,7 +496,7 @@ void ProcessGroupXCCL::waitForFutureOrTimeout(
     data.integers["pg_id"] = local_id_;
     data.integers["rank"] = rank_;
     data.integers["global_rank"] = globalRank();
-    data.strings["flight_recorder_version"] = c10d::version_val_str;
+    data.strings["flight_recorder_version"] = ""; //c10d::version_val_str;
   }
 
   TORCH_CHECK(fut.valid(), "Expected a valid future");
@@ -630,23 +559,6 @@ void ProcessGroupXCCL::waitForFutureOrTimeout(
 }
 // Abort all communicators on this rank
 bool ProcessGroupXCCL::abort(std::optional<std::string> abortReason) {
-  // This will log counter for how long the abort actually takes.
-  STATIC_SCOPED_WAIT_COUNTER(pytorch.ProcessGroupXCCL__abort);
-  // Remove record from global ncclCommDevIdxMapMutex before aboarting,
-  // so that a new cache segment would not register to already aborded
-  // communicators. Note that ncclCommDevIdxMap is a global container which may
-  // contain other PG's communicators, thus we need to only erase communicators
-  // for the current PG.
-  ncclCommDevIdxMapMutex.lock();
-  for (auto& it : devNCCLCommMap_) {
-    auto& ncclComm = it.second;
-    ncclCommDevIdxMap.erase(ncclComm);
-  }
-  ncclCommDevIdxMapMutex.unlock();
-
-  std::lock_guard<std::mutex> lock(mutex_);
-  abortCommsFromMap(devNCCLCommMap_, abortReason);
-  abortCommsFromMap(inInitializationCommMap_, abortReason);
   return true;
 }
 // todo: do we need it?
@@ -663,8 +575,7 @@ void ProcessGroupXCCL::shutdown(std::optional<std::string> reason) {
   std::future<bool> fut = std::async(
       std::launch::async, [this, &reason]() { return this->abort(reason); });
 
-  waitForFutureOrTimeout(
-      fut, options_->timeout, "ProcessGroup abort", true, false);
+  waitForFutureOrTimeout(fut, options_->timeout, "ProcessGroup abort", true, false);
   LOG(INFO) << logPrefix() << "ProcessGroupXCCL aborts successfully.";
 
   // We need to wait for abort to finish before we can safely shut down
@@ -690,27 +601,6 @@ ProcessGroupXCCL::~ProcessGroupXCCL() {
     // needs to do so
     shutdown();
   }
-}
-
-bool ProcessGroupXCCL::dumpDebuggingInfo() {
-  // Serialize all calls to this function to avoid corrupting data, but allow
-  // multiple calls in one runtime. User is responsible for preserving the
-  // output file from an earlier call before a later call overwrites it.
-  static std::mutex writeDebugInfoMutex;
-  std::lock_guard<std::mutex> lock(writeDebugInfoMutex);
-  LOG(ERROR) << logPrefix() << "ProcessGroupXCCL preparing to dump debug info.";
-  if (ncclTraceBufferSize_ > 0) {
-    // We dump nccl trace into local disk by default and users can register
-    // their customized writer by inheriting `DebugInfoWriter` via
-    // `registerDebugInfoWriter`.
-    auto ncclTrace = dump_nccl_trace(true, true, false);
-    DebugInfoWriter& writer = DebugInfoWriter::getWriter(globalRank());
-    LOG(INFO) << logPrefix() << "ProcessGroupXCCL dumping nccl trace to "
-              << writer.getWriterTarget();
-    writer.write(ncclTrace);
-    return true;
-  }
-  return false;
 }
 
 // We want to have both PG ID and global unique ID (guid) for the logging
@@ -742,7 +632,8 @@ std::string ProcessGroupXCCL::createLogPrefix() const {
 }
 
 const std::string& ProcessGroupXCCL::logPrefix() const {
-  return logPrefix_;
+    return "";
+//  return logPrefix_;
 }
 
 const int& ProcessGroupXCCL::globalRank() const {
@@ -850,9 +741,7 @@ c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> ProcessGroupXCCL::initWork(
       profilingTitle,
       profilingTitle != nullptr ? std::optional<std::vector<at::Tensor>>(inputs)
                                 : std::nullopt,
-      desyncDebug_,
       enableTiming_.load(),
-      cudaEventCacheEnabled_.load(),
       dist_debug_level_);
   return r;
 }
@@ -875,7 +764,8 @@ float ProcessGroupXCCL::WorkXCCL::getDuration() const {
   TORCH_CHECK(
       ncclEndEvent_,
       "getDuration only works if ncclEndEvents_ is populated, which should always be true");
-  return ncclStartEvent_->elapsed_time(*ncclEndEvent_);
+//  return ncclStartEvent_->elapsed_time(*ncclEndEvent_);
+  return 0.0f;
 }
 
 uint64_t ProcessGroupXCCL::WorkXCCL::getSequencenumber() const {
@@ -886,10 +776,6 @@ void ProcessGroupXCCL::assignTimeoutToWork(
     const c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work,
     const c10::intrusive_ptr<ProcessGroupXCCL::Options>& option) {
   std::chrono::milliseconds timeout = option->timeout;
-  std::lock_guard<std::mutex> timeoutLock(mtxTimeoutExtension_);
-  if (ephemeralTimeoutActive_.count() > 0) {
-    timeout += ephemeralTimeoutActive_;
-  }
   work->opTimeout_ = timeout;
 }
 
@@ -902,17 +788,17 @@ void ProcessGroupXCCL::workEnqueue(
     // needs to be destructed in user thread. Otherwise will
     // get deadlock. Here we enqueue work without outputs_.
     workMetaList_.emplace_back(*work);
-    // update the PG status related to the last enqueued work
-    pgStatus_->lastEnqueuedSeq = work->seq_;
-    pgStatus_->lastEnqueuedWorkName = opTypeToString(work->opType_);
-    pgStatus_->lastEnqueuedNumelIn = work->numelIn_;
-    pgStatus_->lastEnqueuedNumelOut = work->numelOut_;
+//    // update the PG status related to the last enqueued work
+//    pgStatus_->lastEnqueuedSeq = work->seq_;
+//    pgStatus_->lastEnqueuedWorkName = opTypeToString(work->opType_);
+//    pgStatus_->lastEnqueuedNumelIn = work->numelIn_;
+//    pgStatus_->lastEnqueuedNumelOut = work->numelOut_;
     lastWorkListUpdateTime_ = std::chrono::steady_clock::now();
   }
 }
 
 ProcessGroupXCCL::Options::Options(bool is_high_priority_stream)
-    : Backend::Options(NCCL_BACKEND_NAME, kProcessGroupXCCLDefaultTimeout),
+    : Backend::Options(XCCL_BACKEND_NAME, kProcessGroupXCCLDefaultTimeout),
       is_high_priority_stream(is_high_priority_stream) {}
 
 static constexpr int CoalActive = 0x01, CoalColl = 0x02, CoalP2P = 0x04;
@@ -970,7 +856,8 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::endCoalescing(OpType optype) {
 //      (coalescing_state_) && capture_status == c10::cuda::CaptureStatus::None;
   auto work =
       initWork(device, rank_, optype, "nccl:coalesced", {}, {}, enqueue);
-  work->ncclComm_ = comm;
+
+  work->cclComm_ = comm;
   work->blockingWait_ = blockingWait_;
   work->avoidRecordStreams_ = avoidRecordStreams_;
   work->store_ = store_;
@@ -1017,77 +904,77 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::endCoalescing() {
 c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce_sparse(
     std::vector<at::Tensor>& tensors,
     const AllreduceOptions& opts) {
-  raise exception("not supported");
-}
-
-std::shared_ptr<void*> communicatorImpl() {
-    raise exception("not supported");
+    TORCH_CHECK(
+        false, "ProcessGroupXCCL::allreduce_sparse not implemented");
 }
 
 void ProcessGroupXCCL::CollectivesImpl::allreduceImpl(at::Tensor& input, at::Tensor& output,
-    cclComm_t comm, c10::Stream& stream) {
+    cclComm_t comm, c10::Stream& stream, const AllreduceOptions& opts) {
     // comm created
     auto xcclDataType = getXcclDataType(input.scalar_type());
     auto xcclReduceOp = getXcclReduceOp(opts.reduceOp, input);
     ccl::event ret_evt;
-    ret_evt = ccl::allreduce(
-        input.data_ptr(),
-        output.data_ptr(),
-        (size_t)input.numel(),
-        xcclDataType,
-        xcclReduceOp,
-        comm,
-        stream,
-        attr);
+//    ret_evt = ccl::allreduce(
+//        input.data_ptr(),
+//        output.data_ptr(),
+//        (size_t)input.numel(),
+//        xcclDataType,
+//        xcclReduceOp,
+//        comm,
+//        stream);
     return;
 }
 
-  template <typename Fn, typename PreProcess, typename PostProcess>
-   c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
-      std::vector<at::Tensor>& inputs,
-      std::vector<at::Tensor>& outputs,
-      Fn fn,
-      PreProcess pre,
-      PostProcess post,
-      OpType opType,
-      const char* profilingTitle = nullptr,
-      bool avoidRecordStreams = false,
-      bool nanCheck = true) {
-      using traits = function_traits<Fn>;
-      using attr_t = typename traits::template arg<2>::type;
-      attr_t attr = ccl::create_operation_attr<attr_t>();
+bool ProcessGroupXCCL::complexViewAsRealAllowed(const ReduceOp reduceOp) {
+  return false;
+}
 
-      auto device = inputs[0].device();
-      const auto key = std::to_string(device.index());
-      auto comm = getXCCLComm(key, device);
-
-      auto stream = xcclStreams_.at(key);
-
-      c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
-
-      work = initWork(device, rank_, opType, profilingTitle, avoidRecordStreams, nanCheck);
-
-      work->outputs_ =
-          std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
-      c10::xpu::XPUCachingAllocator::recordStream(
-          input.storage().data_ptr(), stream);
-
-      auto ccl_stream = ccl::create_stream(stream.queue());
-
-      fn(input, output, attr, *comm, ccl_stream);
-
-      work->ncclEndEvent_->record(stream);
-
-      std::vector<c10::Stream> streams = {stream.unwrap()};
-      c10::MultiStreamGuard streamGuard(streams);
-      std::vector<at::Device> devices{device};
-      work->future_ = c10::make_intrusive<at::ivalue::Future>(
-          c10::ListType::create(c10::TensorType::get()), devices);
-      work->future_->markCompleted(at::IValue(*work->outputs_));
-      work->blockingWait_ = blockingWait_;
-
-      return work;
-   }
+//  template <typename Fn, typename PreProcess, typename PostProcess>
+//   c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
+//      std::vector<at::Tensor>& inputs,
+//      std::vector<at::Tensor>& outputs,
+//      Fn fn,
+//      PreProcess pre,
+//      PostProcess post,
+//      OpType opType,
+//      const char* profilingTitle = nullptr,
+//      bool avoidRecordStreams = false,
+//      bool nanCheck = true) {
+//      using traits = function_traits<Fn>;
+//      using attr_t = typename traits::template arg<2>::type;
+//      attr_t attr = ccl::create_operation_attr<attr_t>();
+//
+//      auto device = inputs[0].device();
+//      const auto key = std::to_string(device.index());
+//      auto comm = getXCCLComm(key, device);
+//
+//      auto stream = xcclStreams_.at(key);
+//
+//      c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
+//
+//      work = initWork(device, rank_, opType, profilingTitle, avoidRecordStreams, nanCheck);
+//
+//      work->outputs_ =
+//          std::make_shared<std::vector<at::Tensor>>(std::move(outputs));
+//      c10::xpu::XPUCachingAllocator::recordStream(
+//          input.storage().data_ptr(), stream);
+//
+//      auto ccl_stream = ccl::create_stream(stream.queue());
+//
+//      fn(input, output, attr, *comm, ccl_stream);
+//
+//      work->ncclEndEvent_->record(stream);
+//
+//      std::vector<c10::Stream> streams = {stream.unwrap()};
+//      c10::MultiStreamGuard streamGuard(streams);
+//      std::vector<at::Device> devices{device};
+//      work->future_ = c10::make_intrusive<at::ivalue::Future>(
+//          c10::ListType::create(c10::TensorType::get()), devices);
+//      work->future_->markCompleted(at::IValue(*work->outputs_));
+//      work->blockingWait_ = blockingWait_;
+//
+//      return work;
+//   }
 
 c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
     std::vector<at::Tensor>& tensors,
@@ -1104,1082 +991,32 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
   }
   check_gpu_single_tensor(tensor);
 
-  TORCH_CHECK(
-      !isFloat8Type(tensor.scalar_type()),
-      "Float8 dtypes are not currenlty supported for NCCL reductions");
   // @lint-ignore CLANGTIDY
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      tensors, // inputTensors
-      tensors, // outputTensors
-      rank_, // rank
-      "allreduce", // collective name
-      tensor.numel(), // inNelems
-      tensor.numel(), // outNelems
-      tensor.scalar_type(), // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSizes
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
+//  RECORD_PARAM_COMMS_DATA(
+//      static_cast<int>(
+//          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+//      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+//      tensors, // inputTensors
+//      tensors, // outputTensors
+//      rank_, // rank
+//      "allreduce", // collective name
+//      tensor.numel(), // inNelems
+//      tensor.numel(), // outNelems
+//      tensor.scalar_type(), // dType
+//      std::vector<int64_t>(), // inSplitSizes
+//      std::vector<int64_t>(), // outSplitSizes
+//      globalRankStart, // globalRankStart
+//      globalRankStride, // globalRankStride
+//      this->getSize()); // worldSize
 
   // avoidRecordStreams_ note: collective() will stash tensors.
   return collective(
       tensor,
       tensor,
-      [&](allreduceImpl(at::Tensor& input,
-          at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream),
+      CollectivesImpl::allreduceImpl,
       OpType::ALLREDUCE,
-      "nccl:all_reduce");
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce_coalesced(
-    std::vector<at::Tensor>& tensors,
-    const AllreduceCoalescedOptions& opts) {
-  auto total_numel = check_gpu_tensors_same_device(tensors);
-  TORCH_CHECK(
-      !isFloat8Type(tensors.back().scalar_type()),
-      "Float8 dtypes are not currenlty supported for NCCL reductions");
-
-  // @lint-ignore CLANGTIDY
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      tensors, // inputTensors
-      tensors, // outputTensors
-      rank_, // rank
-      "allreduce_coalesced", // collective name
-      total_numel, // inNelems
-      total_numel, // outNelems
-      tensors[0].scalar_type(), // dType
-      // I'm not sure what in,outSplitSizes mean here.
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSizes
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  // avoidRecordStreams_ note: collective() will stash tensors.
-  return collectiveCoalesced(
-      tensors,
-      tensors,
-      [&](allreduceImpl(at::Tensor& input,
-          at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream),
-      OpType::COALESCED,
-      "nccl:allreduce_coalesced");
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::broadcast(
-    std::vector<at::Tensor>& tensors,
-    const BroadcastOptions& opts) {
-  TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
-  auto tensor = tensors.back();
-  if (tensor.is_complex()) {
-    tensor = at::view_as_real(tensor);
+      "xccl:all_reduce");
   }
-  check_gpu_single_tensor(tensor);
-
-  // @lint-ignore CLANGTIDY
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      tensors, // inputTensors
-      tensors, // outputTensors
-      opts.rootRank, // root rank
-      "broadcast", // collective name
-      tensor.numel(), // inNelems
-      tensor.numel(), // outNelems
-      tensor.scalar_type(), // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSizes
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  // avoidRecordStreams_ note: collective() will stash tensors.
-  bool avoidRecordStreams = avoidRecordStreams_ || (!opts.asyncOp);
-
-  const auto root = opts.rootRank + opts.rootTensor;
-  bool nanCheck = (root == rank_);
-
-  return collective(
-      tensor,
-      tensor,
-      [&](broadcastImpl(at::Tensor& input,
-          at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream),
-      OpType::BROADCAST,
-      "nccl:broadcast",
-      avoidRecordStreams,
-      nanCheck);
-}
-
-// _broadcast_oop adds an out-of-place broadcast in PGNCCL
-// Custom collectives may be implemented by coalescing broadcast operations
-// One use-case is implementing a vector all_gather (all_gather_v)
-// where unevenly sized inputs are gathered among participating ranks
-// Since all_gather provides an out-of-place API, an all_gather_v
-// semantic implemented inside pg_nccl.all_gather also needs to support
-// out-of-place, for which an out-of-place broadcast is required to be added
-c10::intrusive_ptr<Work> ProcessGroupXCCL::_broadcast_oop(
-    at::Tensor& outputTensor,
-    at::Tensor& inputTensor,
-    const BroadcastOptions& opts) {
-  if (outputTensor.numel() != inputTensor.numel()) {
-    C10_THROW_ERROR(
-        ValueError,
-        "Tensor input and output of _broadcast_oop must have the same number of elements ");
-  }
-  const auto root = opts.rootRank + opts.rootTensor;
-  bool nanCheck = (root == rank_);
-  return collective(
-      inputTensor,
-      outputTensor,
-      [&](broadcastImpl(at::Tensor& input,
-          at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream),
-      OpType::BROADCAST,
-      "nccl:_broadcast_oop",
-      /*avoidRecordStreams=*/false,
-      nanCheck);
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::reduce(
-    std::vector<at::Tensor>& tensors,
-    const ReduceOptions& opts) {
-  TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
-  // @lint-ignore CLANGTIDY
-  auto tensor = tensors.back();
-  if (tensor.is_complex()) {
-    TORCH_CHECK(
-        complexViewAsRealAllowed(opts.reduceOp),
-        "reduce does not support",
-        opts.reduceOp,
-        "on complex tensors");
-    tensor = at::view_as_real(tensor);
-  }
-  check_gpu_single_tensor(tensor);
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      tensors, // inputTensors
-      tensors, // outputTensors
-      opts.rootRank, // root rank
-      "reduce", // collective name
-      tensor.numel(), // inNelems
-      tensor.numel(), // outNelems
-      tensor.scalar_type(), // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSizes
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  // avoidRecordStreams_ note: collective() will stash tensors.
-  return collective(
-      tensor,
-      tensor,
-      [&](reduceImpl(at::Tensor& input,
-          at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream),
-      OpType::REDUCE,
-      "nccl:reduce");
-}
-
-// _reduce_oop exposes an out-of-place reduce from PGNCCL
-// Custom collectives may be implemented by coalescing reduce operations
-// One use-case is implementing a vector reduce_scatter (reduce_scatter_v)
-// where inputs are reduced and scattered unevenly among participating ranks
-// Since reduce_scatter provides an out-of-place API, a reduce_scatter_v
-// semantic implemented inside pg_nccl.reduce_scatter also needs to support
-// out-of-place, for which an out-of-place reduce is required to be added
-c10::intrusive_ptr<Work> ProcessGroupXCCL::_reduce_oop(
-    at::Tensor& outputTensor,
-    at::Tensor& inputTensor,
-    const ReduceOptions& opts) {
-  if (outputTensor.numel() != inputTensor.numel()) {
-    C10_THROW_ERROR(
-        ValueError,
-        "Tensor input and output of _reduce_oop must have the same number of elements ");
-  }
-  return collective(
-      inputTensor,
-      outputTensor,
-      [&](reduceImpl(at::Tensor& input,
-          at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream),
-      OpType::REDUCE,
-      "nccl:_reduce_oop");
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::allgather(
-    std::vector<std::vector<at::Tensor>>& outputTensors,
-    std::vector<at::Tensor>& inputTensors,
-    const AllgatherOptions& opts) {
-  TORCH_CHECK(inputTensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
-  // @lint-ignore CLANGTIDY
-  auto inputTensor = inputTensors.back();
-  check_gpu_single_tensor(inputTensor);
-  // @lint-ignore CLANGTIDY
-  auto outputTensors_ = outputTensors.back();
-
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      inputTensors, // inputTensors
-      outputTensors, // outputTensors
-      rank_, // rank
-      "all_gather", // collective name
-      inputTensor.numel(), // inNelems
-      inputTensor.numel() * // outNelems
-          this->getSize(),
-      inputTensor.scalar_type(), // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSize
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  bool same_size = check_same_size(outputTensors_);
-  if (same_size) {
-    // Flatten a vector of tensors into a single, stacked tensor.
-    at::Tensor outputFlattened = newLikeFlat(outputTensors_);
-
-    return collective(
-        inputTensor,
-        outputFlattened,
-        [&](allgatherImpl(at::Tensor& input,
-            at::Tensor& output,
-            cclComm_t comm,
-            c10::Stream& stream),
-        [](c10::Stream& ncclStream,
-           c10::intrusive_ptr<ProcessGroupXCCL::WorkNCCL>& work) {
-          // avoidRecordStreams_ note: We actually don't need to stash anything
-          // here.
-          //  - inputTensors is stashed onto work->stashed_for_allocator_safety_
-          //    in collective().
-          //  - outputFlattened is stashed onto work->outputs_ in collective().
-          //  - User-facing outputTensors should be held by the user until after
-          //    waiting on work_, or the call makes no sense.
-          // So all participating tensors are accounted for, and won't be
-          // released back to their allocation streams until after work_ is
-          // waited on.
-          if (!avoidRecordStreams_) {
-            c10::xpu::XPUCachingAllocator::recordStream(
-                output.storage().data_ptr(), stream);
-      }
-        },
-        [&](c10::Stream& ncclStream,
-            c10::intrusive_ptr<ProcessGroupXCCL::WorkNCCL>& work) {
-          // Copy the flattened output tensors to the outputs.
-          c10::StreamGuard guard(ncclStream);
-          for (const auto j : c10::irange(outputTensors_.size())) {
-            // See [Sync Streams].
-            if (!avoidRecordStreams_) {
-              c10::xpu::XPUCachingAllocator::recordStream(
-                  outputTensors_[j].storage().data_ptr(), ncclStream);
-            }
-            outputTensors_[j].copy_(outputFlattened[j], true);
-          }
-        },
-        OpType::ALLGATHER,
-        "nccl:all_gather");
-  } else {
-    const auto num_reduces = outputTensors_.size();
-    startCoalescing();
-    for (const int i : c10::irange(num_reduces)) {
-      auto& output = outputTensors_[i];
-      auto& input = (i == rank_) ? inputTensor : output;
-      auto broadcastOpts = BroadcastOptions{
-          static_cast<int64_t>(i), static_cast<int64_t>(0), opts.timeout};
-      _broadcast_oop(output, input, broadcastOpts);
-    }
-    auto work = endCoalescing(OpType::ALLGATHER);
-    return work;
-  }
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::allgather_coalesced(
-    std::vector<std::vector<at::Tensor>>& /* unused */,
-    std::vector<at::Tensor>& /* unused */,
-    const AllgatherOptions& /* unused */) {
-  C10_THROW_ERROR(
-      NotImplementedError,
-      "ProcessGroupXCCL does not support allgather_coalesced");
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::allgather_into_tensor_coalesced(
-    std::vector<at::Tensor>& outputs,
-    std::vector<at::Tensor>& inputs,
-    const AllgatherOptions& opts) {
-  return collectiveCoalesced(
-      inputs,
-      outputs,
-      [&](allgatherImpl(at::Tensor& input,
-          at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream),
-      OpType::COALESCED,
-      "nccl:all_gather_into_tensor_coalesced");
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::reduce_scatter(
-    std::vector<at::Tensor>& outputTensors,
-    std::vector<std::vector<at::Tensor>>& inputTensors,
-    const ReduceScatterOptions& opts) {
-  TORCH_CHECK(outputTensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
-  // @lint-ignore CLANGTIDY
-  auto outputTensor = outputTensors.back();
-  check_gpu_single_tensor(outputTensor);
-  // @lint-ignore CLANGTIDY
-  auto inputTensors_ = inputTensors.back();
-  TORCH_CHECK(
-      !isFloat8Type(outputTensor.scalar_type()),
-      "Float8 dtypes are not currenlty supported for NCCL reductions");
-
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      inputTensors, // inputTensors
-      outputTensors, // outputTensors
-      rank_, // rank
-      "reduce_scatter", // collective name
-      outputTensor.numel() * this->getSize(), // inNelems
-      outputTensor.numel(), // outNelems
-      outputTensor.scalar_type(), // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSizes
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  bool same_size = check_same_size(inputTensors_);
-  if (same_size) {
-    // Flatten a vector of tensors into a single, stacked tensor.
-    at::Tensor inputFlattened = newLikeFlat(inputTensors_);
-
-    return collective(
-        inputFlattened,
-        outputTensor,
-        [&](reducescatterImpl(at::Tensor& input,
-            at::Tensor& output,
-            cclComm_t comm,
-            c10::Stream& stream),
-        [&](c10::Stream& ncclStream,
-            c10::intrusive_ptr<ProcessGroupXCCL::WorkNCCL>& work) {
-          if (avoidRecordStreams_) {
-            // We only need to stash inputTensors.
-            //  - inputFlattened is stashed onto
-            //  work->stashed_for_allocator_safety_
-            //    in collective().
-            //  - User-facing outputTensors is stashed onto work->outputs_ in
-            //  collective(),
-            //    and should also be held by the user until after waiting on
-            //    work_.
-            auto& v = work->stashed_for_allocator_safety_;
-            v->insert(v->end(), inputTensors_.begin(), inputTensors_.end());
-          }
-
-          // Copy the input tensors to the flattened inputs.
-          at::xpu::XPUStreamGuard guard(ncclStream);
-          for (const auto j : c10::irange(inputTensors_.size())) {
-            // See [Sync Streams].
-            if (!avoidRecordStreams_) {
-              c10::xpu::XPUCachingAllocator::recordStream(
-                  inputTensors_[j].storage().data_ptr(), ncclStream);
-            }
-            inputFlattened[j].copy_(inputTensors_[j], true);
-          }
-          if (!avoidRecordStreams_) {
-            c10::xpu::XPUCachingAllocator::recordStream(
-                output.storage().data_ptr(), stream);
-          }
-        },
-        [&](c10::Stream&,
-            c10::intrusive_ptr<ProcessGroupXCCL::WorkNCCL>& work) {},
-        OpType::REDUCE_SCATTER,
-        "nccl:reduce_scatter");
-  } else {
-    const auto num_reduces = inputTensors_.size();
-    startCoalescing();
-    for (const int i : c10::irange(num_reduces)) {
-      auto& input = inputTensors_[i];
-      auto& output = (i == rank_) ? outputTensor : input;
-      auto reduceOpts = ReduceOptions{
-          opts.reduceOp,
-          static_cast<int64_t>(i),
-          static_cast<int64_t>(0),
-          opts.timeout};
-      _reduce_oop(output, input, reduceOpts);
-    }
-    auto work = endCoalescing(OpType::REDUCE_SCATTER);
-    return work;
-  }
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::_reduce_scatter_base(
-    at::Tensor& outputTensor,
-    at::Tensor& inputTensor,
-    const ReduceScatterOptions& opts) {
-  if (inputTensor.dtype() != outputTensor.dtype()) {
-    C10_THROW_ERROR(
-        TypeError, "input tensor must be the same type as the output tensor.");
-  }
-
-  if (inputTensor.numel() != outputTensor.numel() * size_) {
-    C10_THROW_ERROR(
-        ValueError,
-        "input tensor must be the same size as output size times world size");
-  }
-
-  // @lint-ignore CLANGTIDY
-  const auto& tensor = outputTensor;
-  TORCH_CHECK(
-      !isFloat8Type(tensor.scalar_type()),
-      "Float8 dtypes are not currenlty supported for NCCL reductions");
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      inputTensor, // inputTensor
-      outputTensor, // outputTensor
-      rank_, // rank
-      "_reduce_scatter_base", // collective name
-      inputTensor.numel(), // inNelems
-      tensor.numel(), // outNelems
-      tensor.scalar_type(), // dtype
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSizes
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  // avoidRecordStreams_ note: collective() will stash inputs and outputs.
-  // Note 2: for asyncOp = false, we don't want to record streams because we
-  // know that the NCCL stream will join back to the "current" stream right
-  // after this op. So we might just as well keep the stream ownership of the
-  // input/output tensors unchanged. The benefit would be that the
-  // allocation/free of the tensors would look deterministic to the "current"
-  // stream so that the caching allocator can reuse memory pool for this stream
-  // in a clever way. This setting is added for libraries like FSDP which uses
-  // `reduce_scatter_tensor`.
-  bool avoidRecordStreams = avoidRecordStreams_ || (!opts.asyncOp);
-
-  return collective(
-      inputTensor,
-      outputTensor,
-      [&](reducescatterImpl(at::Tensor& input,
-          at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream),
-      [&]{
-        if (!avoidRecordStreams) {
-//          c10::cuda::CUDACachingAllocator::recordStream(
-//              output.storage().data_ptr(), stream);
-        }
-      },
-      OpType::_REDUCE_SCATTER_BASE,
-      "nccl:_reduce_scatter_base",
-      avoidRecordStreams);
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::reduce_scatter_tensor_coalesced(
-    std::vector<at::Tensor>& outputs,
-    std::vector<at::Tensor>& inputs,
-    const ReduceScatterOptions& opts) {
-  TORCH_CHECK(
-      !isFloat8Type(inputs.back().scalar_type()),
-      "Float8 dtypes are not currenlty supported for NCCL reductions");
-  return collectiveCoalesced(
-      inputs,
-      outputs,
-      [&](reducescatterImpl(at::Tensor& input,
-          at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream),
-      [&]{
-        if (!avoidRecordStreams) {
-//          c10::cuda::CUDACachingAllocator::recordStream(
-//              output.storage().data_ptr(), stream);
-        }
-      },
-      OpType::COALESCED,
-      "nccl:reduce_scatter_tensor_coalesced");
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::barrier(const BarrierOptions& opts) {
-  RECORD_PARAM_COMMS(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      rank_, // rank
-      "barrier", // collective name
-      0, // inNelems
-      0, // outNelems
-      at::kByte, // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSizes
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  // Device to use for barrier
-  int barDevIdx = -1;
-
-  // Select device to use for barrier
-  // 1st choice: Use user defined GPU device ids if provided
-  if (!opts.device_ids.empty()) {
-    // Use the first device id because PG NCCL is single-device now
-    barDevIdx = opts.device_ids[0];
-  } else if (getBoundDeviceId()) {
-    // 2nd choice: Use the bound GPU device id if available.
-    // Bounded device id can be passed to `init_process_group`.
-    barDevIdx = (*getBoundDeviceId()).index();
-  } else if (!usedDeviceIdxs_.empty()) {
-    // 3rd choice: infer the device id from the used device ids.
-    barDevIdx = *usedDeviceIdxs_.begin();
-  } else {
-    // This means there is not yet a NCCL collective being called
-    // Here we have to use the best guesses and will use a single GPU to call
-    // allreduce to achieve barrier.
-    // In case the multiple processes fall into the same node, we use rank to
-    // ensure that each process is on a different GPU
-    // Note: it is better to use global rank because the group-local rank can be
-    // offset wrt the device id if intra-node GPUs are sharded into multiple
-    // dimensions.
-    barDevIdx = static_cast<int16_t>(globalRank() % localDeviceCount_);
-    LOG(WARNING)
-        << logPrefix()
-        << c10::str(
-               " using GPU ",
-               barDevIdx,
-               " to perform barrier as devices used by this process are currently unknown. ",
-               "This can potentially cause a hang if this rank to GPU mapping is incorrect.",
-               "Specify device_ids in barrier() to force use of a particular device,",
-               "or call init_process_group() with a device_id.");
-  }
-
-  TORCH_CHECK_WITH(
-      ValueError,
-      barDevIdx >= 0,
-      "Failed to infer a GPU device id to perform barrier. ");
-  auto barDevice = at::Device(at::DeviceType::XPU, barDevIdx);
-
-  // Create a dummy tensor on the device
-  // Note: we use zeros() instead of empty() to prevent barrier from triggering
-  // alarm when NaN checker is enabled.
-  at::Tensor barrierTensor =
-      at::zeros({1}, at::TensorOptions().device(barDevice).dtype(at::kFloat));
-
-  // All reduce to achieve the barrier
-  auto work = allreduce(barrierTensor);
-
-  // Work will take over barrierTensors
-  auto ncclWork = dynamic_cast<ProcessGroupXCCL::WorkNCCL*>(work.get());
-  TORCH_CHECK(ncclWork);
-  ncclWork->barrierTensor_ = std::move(barrierTensor);
-  return work;
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall_base(
-    at::Tensor& outputTensor,
-    at::Tensor& inputTensor,
-    std::vector<int64_t>& outputSplitSizes,
-    std::vector<int64_t>& inputSplitSizes,
-    const AllToAllOptions& /* unused */) {
-  check_gpu_single_tensor(outputTensor, true);
-  check_gpu_single_tensor(inputTensor, true);
-  if (outputSplitSizes.size() == 0 && inputSplitSizes.size() == 0) {
-    RECORD_PARAM_COMMS_DATA(
-        static_cast<int>(
-            this->getSequenceNumberForGroup() +
-            1), // seq + 1 to match collective
-        std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-        inputTensor, // inputTensor
-        outputTensor, // outputTensor
-        rank_, // rank
-        "all_to_all", // collective name
-        inputTensor.numel(), // inNelems
-        outputTensor.numel(), // outNelems
-        inputTensor.scalar_type(), // dType
-        std::vector<int64_t>(), // inSplitSizes
-        std::vector<int64_t>(), // outSplitSizes
-        globalRankStart, // globalRankStart
-        globalRankStride, // globalRankStride
-        this->getSize()); // worldSize
-
-    // avoidRecordStreams_ note: collective() will stash inputTensors and
-    // outputTensors.
-    return collective(
-        inputTensor,
-        outputTensor,
-        [&](all2allImpl(at::Tensor& input,
-            at::Tensor& output,
-            cclComm_t comm,
-            c10::Stream& stream),
-        [&]{
-          if (!avoidRecordStreams_) {
-//            c10::cuda::CUDACachingAllocator::recordStream(
-//                output.storage().data_ptr(), stream);
-          }
-        }
-        OpType::ALLTOALL_BASE,
-        "nccl:all_to_all");
-  } else {
-    c10d::checkSplitSizes(inputSplitSizes, inputTensor, size_);
-    c10d::checkSplitSizes(outputSplitSizes, outputTensor, size_);
-
-    RECORD_PARAM_COMMS_DATA(
-        static_cast<int>(
-            this->getSequenceNumberForGroup() +
-            1), // seq + 1 to match collective
-        std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-        inputTensor, // inputTensor
-        outputTensor, // outputTensor
-        rank_, // rank
-        "all_to_allv", // collective name
-        inputTensor.numel(), // inNelems
-        outputTensor.numel(), // outNelems
-        inputTensor.scalar_type(), // dType
-        inputSplitSizes, // inSplitSizes
-        outputSplitSizes, // outSplitSizes
-        globalRankStart, // globalRankStart
-        globalRankStride, // globalRankStride
-        this->getSize()); // worldSize
-
-    // avoidRecordStreams_ note: collective() will stash inputTensors and
-    // outputTensors.
-    return collective(
-        inputTensor,
-        outputTensor,
-        [&](all2allImpl(at::Tensor& input,
-            at::Tensor& output,
-            cclComm_t comm,
-            c10::Stream& stream),
-        OpType::ALLTOALL_BASE,
-        "nccl:all_to_all");
-  }
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall(
-    std::vector<at::Tensor>& outputTensors,
-    std::vector<at::Tensor>& inputTensors,
-    const AllToAllOptions& /* unused */) {
-  std::vector<int64_t> inSplitSizes;
-  std::vector<int64_t> outSplitSizes;
-  int64_t total_numel = 0;
-
-  auto device = outputTensors[0].device();
-  for (const auto r : c10::irange(outputTensors.size())) {
-    check_gpu_single_tensor(outputTensors[r], true);
-    check_gpu_single_tensor(inputTensors[r], true);
-    TORCH_CHECK(
-        device == outputTensors[r].device() &&
-            device == inputTensors[r].device(),
-        "Tensors must be on the same device")
-    inSplitSizes.push_back(inputTensors[r].numel());
-    outSplitSizes.push_back(outputTensors[r].numel());
-    total_numel += inputTensors[r].numel();
-  }
-
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      inputTensors, // inputTensors
-      outputTensors, // outputTensors
-      rank_, // rank
-      "all_to_all", // collective name
-      total_numel, // inNelems
-      total_numel, // outNelems
-      inputTensors.front().scalar_type(), // dType
-      inSplitSizes, // inSplitSizes
-      outSplitSizes, // outSplitSizes
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  return collective(
-      inputTensors,
-      outputTensors,
-      [&](all2allImpl(at::Tensor& /* unused */,
-          at::Tensor& /* unused */,
-          cclComm_t comm,
-          c10::Stream& stream),
-      [&](c10::Stream&,
-          c10::intrusive_ptr<ProcessGroupXCCL::WorkNCCL>& work) {
-        if (avoidRecordStreams_) {
-          // inputTensor0 and outputTensor0 are stashed redundantly by
-          // collective(), but that's ok.
-          auto& v = work->stashed_for_allocator_safety_;
-          v->insert(v->end(), inputTensors.begin(), inputTensors.end());
-          v->insert(v->end(), outputTensors.begin(), outputTensors.end());
-        }
-      },
-      [](c10::Stream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkNCCL>& work) {},
-      OpType::ALLTOALL,
-      "nccl:all_to_all");
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::send(
-    std::vector<at::Tensor>& tensors,
-    int dstRank,
-    int /* unused */) {
-  TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
-  // @lint-ignore CLANGTIDY
-  auto tensor = tensors.back();
-  check_gpu_single_tensor(tensor, true);
-
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      tensors, // inputTensors
-      tensors, // outputTensors
-      dstRank, // dst rank
-      "send", // collective name
-      tensor.numel(), // inNelems
-      tensor.numel(), // outNelems
-      tensor.scalar_type(), // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSizes
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  auto ret = pointToPoint(
-      tensor,
-      [&](sendImpl(at::Tensor& input,
-          cclComm_t comm,
-          c10::Stream& stream,
-          int dst),
-      dstRank,
-      OpType::SEND,
-      c10::str("nccl:send ", rank_, "->", dstRank).c_str());
-  return ret;
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::recv(
-    std::vector<at::Tensor>& tensors,
-    int srcRank,
-    int /* unused */) {
-  TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
-  // @lint-ignore CLANGTIDY
-  auto tensor = tensors.back();
-  check_gpu_single_tensor(tensor, true);
-
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      tensors, // inputTensors
-      tensors, // outputTensors
-      srcRank, // src rank
-      "recv", // collective name
-      tensor.numel(), // inNelems
-      tensor.numel(), // outNelems
-      tensor.scalar_type(), // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSizes
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  auto ret = pointToPoint(
-      tensor,
-      [&](recvImpl(at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream,
-          int src),
-      srcRank,
-      OpType::RECV,
-      c10::str("nccl:recv ", rank_, "<-", srcRank).c_str());
-  return ret;
-}
-
-void ProcessGroupXCCL::groupStart() {
-  groupStartImpl();
-  ++ncclActiveGroupCounter_;
-}
-
-void ProcessGroupXCCL::groupEnd() {
-  groupEndImpl();
-  --ncclActiveGroupCounter_;
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::gather(
-    std::vector<std::vector<at::Tensor>>& outputTensors,
-    std::vector<at::Tensor>& inputTensors,
-    const GatherOptions& opts) {
-  static auto invalidArgument = [](const std::string& msg) {
-    C10_THROW_ERROR(ValueError, "ProcessGroupXCCL::gather: " + msg);
-  };
-
-  assertRootRank(invalidArgument, opts.rootRank, size_);
-
-  TORCH_CHECK(inputTensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
-  // @lint-ignore CLANGTIDY
-  auto inputTensor = inputTensors.back();
-
-  std::vector<at::Tensor> outputs;
-
-  if (getRank() == opts.rootRank) {
-    if (outputTensors.size() != 1) {
-      std::stringstream ss;
-      ss << "requires a single-element output list containing a list with "
-         << getSize() << " tensors.";
-      invalidArgument(ss.str());
-    } else if (outputTensors[0].size() != static_cast<size_t>(getSize())) {
-      std::stringstream ss;
-      ss << "Incorrect output list size " << outputTensors[0].size()
-         << ". Output list size should be " << getSize()
-         << ", same as size of the process group.";
-      invalidArgument(ss.str());
-    }
-
-    const auto& options = inputTensor.options();
-    const auto& sizes = inputTensor.sizes();
-    assertTypeAndSizesMatch(invalidArgument, outputTensors[0], options, sizes);
-    outputs = outputTensors[0];
-  } else {
-    // if not in the root rank, initialize outputs as empty list
-    if (outputTensors.size() != 0) {
-      invalidArgument("requires empty output on non-root");
-    }
-    outputs = {};
-    // append a empty tensor to the list, we don't use it but the
-    // `collective` template function requires it to invoke its function
-    outputs.emplace_back();
-  }
-
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      inputTensors, // inputTensors
-      outputTensors, // outputTensors
-      opts.rootRank, // root rank
-      "gather", // collective name
-      inputTensor.numel(), // inNelems
-      inputTensor.numel() * this->getSize(), // outNelems
-      inputTensor.scalar_type(), // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSize
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  // avoidRecordStreams_ note: collective() will stash inputTensors and
-  // outputs, which == outputTensors[0] on the root rank where it matters.
-
-  auto inputs = std::vector<at::Tensor>{inputTensor};
-  return collective(
-      inputs,
-      outputs, // just to fit the collective interface
-      [&](gatherImpl(at::Tensor& /* unused */,
-          at::Tensor& /* unused */,
-          cclComm_t comm,
-          c10::Stream& stream),
-      [](c10::Stream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkNCCL>& work) {
-            const auto root = opts.rootRank;
-            if (getRank() == root) {
-              if (!avoidRecordStreams_) {
-                for (auto output : outputs) {
-//                  c10::cuda::CUDACachingAllocator::recordStream(
-//                      output.storage().data_ptr(), stream);
-                }
-              }
-            }
-         },
-      [](c10::Stream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkNCCL>& work) {},
-      OpType::GATHER,
-      "nccl:gather");
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::scatter(
-    std::vector<at::Tensor>& outputTensors,
-    std::vector<std::vector<at::Tensor>>& inputTensors,
-    const ScatterOptions& opts) {
-  static auto invalidArgument = [](const std::string& msg) {
-    C10_THROW_ERROR(ValueError, "ProcessGroupXCCL::scatter: " + msg);
-  };
-
-  assertRootRank(invalidArgument, opts.rootRank, size_);
-
-  TORCH_CHECK(outputTensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
-  auto outputTensor = outputTensors.back();
-
-  std::vector<at::Tensor> inputs;
-
-  if (getRank() == opts.rootRank) {
-    if (inputTensors.size() != 1) {
-      std::stringstream ss;
-      ss << "requires a single-element input list containing a list with "
-         << getSize() << " tensors.";
-      invalidArgument(ss.str());
-    } else if (inputTensors[0].size() != static_cast<size_t>(getSize())) {
-      std::stringstream ss;
-      ss << "Incorrect input list size " << inputTensors[0].size()
-         << ". Input list size should be " << getSize()
-         << ", same as size of the process group.";
-      invalidArgument(ss.str());
-    }
-
-    const auto& options = outputTensor.options();
-    const auto& sizes = outputTensor.sizes();
-    assertTypeAndSizesMatch(invalidArgument, inputTensors[0], options, sizes);
-    inputs = inputTensors[0];
-  } else {
-    // if not in the root rank, initialize inputTensors as empty place holder
-    // with an empty list
-    if (inputTensors.size() != 0) {
-      invalidArgument("requires empty input on non-root");
-    }
-    inputs = {};
-    // append a empty tensor to the list, we don't use it but the
-    // `collective` template function requires it to invoke its function
-    inputs.emplace_back();
-  }
-
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      inputTensors, // inputTensors
-      outputTensors, // outputTensors
-      opts.rootRank, // root rank
-      "scatter", // collective name
-      outputTensor.numel() * this->getSize(), // inNelems
-      outputTensor.numel(), // outNelems
-      outputTensor.scalar_type(), // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSize
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  // avoidRecordStreams_ note: collective() will stash outputTensors and
-  // inputs, which == inputTensors[0] on the root rank where it matters.
-  bool avoidRecordStreams = avoidRecordStreams_ || (!opts.asyncOp);
-
-  const auto root = opts.rootRank;
-  bool nanCheck = (rank_ == root);
-
-  auto outputs = std::vector<at::Tensor>{outputTensor};
-  return collective(
-      outputs,
-      inputs, // just to fit the collective interface
-      [&](scatterImpl(at::Tensor& /* unused */,
-          at::Tensor& /* unused */,
-          cclComm_t comm,
-          c10::Stream& stream),
-      [](c10::Stream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {
-          if (getRank() == root) {
-              if (!avoidRecordStreams) {
-                for (auto input : inputs) {
-//                  c10::cuda::CUDACachingAllocator::recordStream(
-//                      input.storage().data_ptr(), stream);
-                }
-              }
-          }
-         },
-      [](c10::Stream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-      OpType::SCATTER,
-      "nccl:scatter",
-      avoidRecordStreams,
-      nanCheck);
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::recvAnysource(
-    std::vector<at::Tensor>& /* unused */,
-    int /* unused */) {
-  C10_THROW_ERROR(
-      NotImplementedError, "ProcessGroupXCCL does not support recvAnysource");
-}
-
-c10::intrusive_ptr<Work> ProcessGroupXCCL::_allgather_base(
-    at::Tensor& output_tensor,
-    at::Tensor& input_tensor,
-    const AllgatherOptions& opts) {
-  check_gpu_single_tensor(input_tensor);
-  check_gpu_single_tensor(output_tensor);
-
-  if (input_tensor.dtype() != output_tensor.dtype()) {
-    C10_THROW_ERROR(
-        TypeError, "output tensor must have the same type as input tensor");
-  }
-
-  if (input_tensor.numel() * size_ != output_tensor.numel()) {
-    C10_THROW_ERROR(
-        ValueError,
-        "output tensor size must be equal to world_size times input tensor size");
-  }
-
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      input_tensor, // inputTensors
-      output_tensor, // outputTensors
-      rank_, // rank
-      "_allgather_base", // collective name
-      input_tensor.numel(), // inNelems
-      output_tensor.numel(), // outNelems
-      output_tensor.scalar_type(), // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSize
-      globalRankStart, // globalRankStart
-      globalRankStride, // globalRankStride
-      this->getSize()); // worldSize
-
-  // avoidRecordStreams_ note: collective() will stash inputs and outputs.
-  // Note 2: for asyncOp = false, we don't want to record streams because we
-  // know that the NCCL stream will join back to the "current" stream right
-  // after this op. So we might just as well keep the stream ownership of the
-  // input/output tensors unchanged. The benefit would be that the
-  // allocation/free of the tensors would look deterministic to the "current"
-  // stream so that the caching allocator can reuse memory pool for this stream
-  // in a clever way. This setting is added for libraries like FSDP which uses
-  // `all_gather_into_tensor`.
-  bool avoidRecordStreams = avoidRecordStreams_ || (!opts.asyncOp);
-
-  return collective(
-      input_tensor,
-      output_tensor,
-      [&](allgatherImpl(at::Tensor& input,
-          at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream),
-      [&]{
-          if (!avoidRecordStreams) {
-//               c10::cuda::CUDACachingAllocator::recordStream(
-//              output.storage().data_ptr(), stream);
-        }
-      },
-      OpType::_ALLGATHER_BASE,
-      "nccl:_all_gather_base",
-      avoidRecordStreams);
-}
 } // namespace c10d
 
 #endif // USE_C10D_NCCL

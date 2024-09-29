@@ -29,16 +29,54 @@
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/PrefixStore.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
-#include <ATen/DynamicLibrary.h>
-#include <c10/core/Stream.h>
-#include <c10/core/StreamGuard.h>
-
-#include <torch/custom_class.h>
+//#include <ATen/DynamicLibrary.h>
+//#include <c10/core/Stream.h>
+//#include <c10/core/StreamGuard.h>
+//
+//#include <torch/custom_class.h>
 
 typedef void* cclComm_t;
 
 namespace c10d {
 
+namespace {
+int getXCCLEnvVar(std::string envVarName) {
+  char* stringValue = std::getenv(envVarName.c_str());
+  if (stringValue != nullptr) {
+    try {
+      int val = std::stoi(stringValue);
+      return val;
+    } catch (std::exception& e) {
+      TORCH_CHECK(
+          false,
+          "Invalid value for environment variable: " + std::string(envVarName));
+    }
+  } else {
+    return -1;
+  }
+}
+
+template <typename T>
+void setXCCLEnvVar(const std::string& envVarName, T val) {
+  if constexpr (std::is_same_v<T, int>) {
+    setenv(envVarName.c_str(), std::to_string(val).c_str(), 1);
+  } else if constexpr (std::is_same_v<T, std::string>) {
+    setenv(envVarName.c_str(), val.c_str(), 1);
+  }
+}
+
+bool with_mpirun() {
+  return (getenv("MPI_LOCALRANKID") || getenv("MPI_LOCALNRANKS") ||
+          getenv("PMI_RANK") || getenv("PMI_SIZE") || getenv("PMIX_RANK"))
+      ? true
+      : false;
+}
+} // namespace
+
+#define SHOULD_TEAR_DOWN(a) (a != NoHandling && a != CleanUpOnly)
+
+using xcclComm_t = ccl::communicator;
+using XCCL_KVS = ccl::shared_ptr_class<ccl::kvs>;
 constexpr const char* XCCL_BACKEND_NAME = "xccl";
 
 constexpr const int kWorkStatusUpdatePeriodMs = 30 * 1000; // 30 seconds
@@ -90,7 +128,7 @@ enum ErrorHandlingMode {
 //   // Now continue on other work in the current stream.
 class TORCH_API ProcessGroupXCCL : public Backend {
  public:
-  class WorkXCCL : public Work, public std::enable_shared_from_this<WorkXCCL> {
+  class WorkXCCL : public Work {
    public:
     friend struct WorkInfo;
 
@@ -104,7 +142,9 @@ class TORCH_API ProcessGroupXCCL : public Backend {
         uint64_t seq,
         const char* profilingTitle = nullptr,
         const std::optional<std::vector<at::Tensor>>& inputs = std::nullopt,
+        bool enableTiming = false,
         DebugLevel distDebugLevel = DebugLevel::Off);
+
     // Copy constructor doing partial copy without outputs_. Cleanup thread
     // monitors and removes finished works. However it will deadlock when
     // destructs outputs_ tensors who are view tensors in autograd graph.
@@ -173,10 +213,10 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
     // The start CUDA event of NCCL operator tracking this work item. These
     // start CUDA events are needed by desync debugging if enabled.
-    std::shared_ptr<c10::Event> ncclStartEvent_;
+    std::shared_ptr<at::xpu::XPUEvent> ncclStartEvent_;
 
     // The end CUDA event of NCCL operator tracking this work item.
-    std::shared_ptr<c10::Event> ncclEndEvent_;
+    std::shared_ptr<at::xpu::XPUEvent> ncclEndEvent_;
 
     // The NCCL communicator used for this work item.
     std::shared_ptr<void*> cclComm_;
@@ -284,40 +324,9 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
   class CollectivesImpl {
     public:
-         void allreduceImpl(at::Tensor& input, at::Tensor& output, cclComm_t comm, c10::Stream& stream);
-         void broadcastImpl(at::Tensor& input, at::Tensor& output, cclComm_t comm, c10::Stream& stream);
-         void reduceImpl(at::Tensor& input, at::Tensor& output, cclComm_t comm, c10::Stream& stream);
-         void allgatherImpl(at::Tensor& input, at::Tensor& output, cclComm_t comm, c10::Stream& stream);
-         void reducescatterImpl(at::Tensor& input,
-            at::Tensor& output,
-            cclComm_t comm,
-            c10::Stream& stream);
-         void all2allImpl(at::Tensor& input,
-            at::Tensor& output,
-            cclComm_t comm,
-            c10::Stream& stream);
-         void sendImpl(at::Tensor& input,
-          cclComm_t comm,
-          c10::Stream& stream,
-          int dst);
-         void recvImpl(
-        at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream,
-          int dst);
-          void gatherImpl(at::Tensor& output,
-          cclComm_t comm,
-          c10::Stream& stream,
-          int dst);
-         void scatterImpl(at::Tensor& /* unused */,
-          at::Tensor& /* unused */,
-          cclComm_t comm,
-          c10::Stream& stream);
-         void groupStartImpl();
-         void groupEndImpl();
-         void* createdCommunicator();
-         void cclCommInitRankConfig();
-         void ncclCommAbort();
+         static void allreduceImpl(at::Tensor& input, at::Tensor& output,
+                        cclComm_t comm, c10::Stream& stream, const AllreduceOptions& opts);
+
   };
 
   // If you wish to create multiple process groups, each with a potentially
@@ -602,6 +611,43 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       PostProcess post,
       const char* profilingTitle = nullptr);
 
+  // Util function to assign timeout to each work.
+  void assignTimeoutToWork(
+      const c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work,
+      const c10::intrusive_ptr<Options>& option);
+
+  // Generates a prefix that is unique to this process group and rank, for
+  // disambiguating logs
+  std::string createLogPrefix() const;
+
+  // Returns the unique prefix created in createLogPrefix
+  const std::string& logPrefix() const;
+
+    // Returns the global rank of the device. This function assumes that users
+  // always create a default global process group(PG) which includes all
+  // devices. It is called in the constructor of ProcessGroupNCCL, so it always
+  // return the rank_ of the the very first PG created, aka, default global PG.
+  const int& globalRank() const;
+
+  // Returns the global ranks of a PG.
+  const std::vector<uint64_t>& groupRanks() const;
+
+  bool complexViewAsRealAllowed(const ReduceOp reduceOp);
+
+  // Ensure thaht if record is True, the work obj will be enqueued via
+  // workEnqueue
+  virtual c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> initWork(
+      at::Device& device,
+      int rank,
+      OpType opType,
+      const char* profilingTitle = nullptr,
+      const std::vector<at::Tensor>& inputs = {},
+      const std::vector<at::Tensor>& outputs = {},
+      bool record = false);
+
+  bool abort(std::optional<std::string> abortReason = std::nullopt);
+  void shutdown(std::optional<std::string> reason = std::nullopt);
+
  protected:
   // In the timeout case and we will dump debug info such as the NCCL flight
   // recorder to storage. Down the road, if we have more complicated or blocking
@@ -671,6 +717,11 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
   bool writeDebugInfo_ = false;
 
+  // Whether or not to create start CUDAEvent and enable timing for start
+  // and end events. Note that enableTiming_ is always true if desyncDebug_
+  // is set to true.
+  std::atomic<bool> enableTiming_;
+
   // Condition Variable for watchdog thread sleep
   std::condition_variable workMetaListCV_;
 
@@ -694,7 +745,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   void workEnqueue(c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>);
 
   // The CUDA streams used by NCCL kernels
-  std::unordered_map<std::string, c10::Stream> ncclStreams_;
+  std::unordered_map<std::string, c10::xpu::XPUStream> ncclStreams_;
 
   // The CUDA events used to sync NCCL streams
   std::unordered_map<std::string, c10::Event> ncclEvents_;
@@ -707,6 +758,9 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
   // Stores device indexes for all collectives run inside a coalescing block
   at::Device coalescedDevice_ = at::Device("xpu");
+
+  // Stores communicators for all collectives run inside a coalescing block
+  std::shared_ptr<void*> coalescedComm_ = nullptr;
 
   // Whether or not wait() and synchronize() are blocking operations that wait
   // for the operation to complete.
