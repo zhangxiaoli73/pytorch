@@ -29,6 +29,14 @@
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/PrefixStore.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
+#include <ATen/DynamicLibrary.h>
+#include <c10/core/Stream.h>
+#include <c10/core/StreamGuard.h>
+
+#include <torch/custom_class.h>
+
+typedef void* cclComm_t;
+
 namespace c10d {
 
 namespace {
@@ -66,10 +74,6 @@ bool with_mpirun() {
 } // namespace
 
 #define SHOULD_TEAR_DOWN(a) (a != NoHandling && a != CleanUpOnly)
-
-static std::vector<std::string> TORCH_XCCL_BLOCKING_WAIT = {
-    "TORCH_XCCL_BLOCKING_WAIT",
-    "XCCL_BLOCKING_WAIT"};
 
 using xcclComm_t = ccl::communicator;
 using XCCL_KVS = ccl::shared_ptr_class<ccl::kvs>;
@@ -126,12 +130,26 @@ class TORCH_API ProcessGroupXCCL : public Backend {
  public:
   class WorkXCCL : public Work {
    public:
+    friend struct WorkInfo;
+
+    // Constructor takes a list of CUDA devices
     WorkXCCL(
+        const std::string& pgUID,
+        const std::string& pgDesc,
         at::Device& device,
         int rank,
         OpType opType,
-        const std::optional<std::vector<at::Tensor>>& inputs = std::nullopt);
+        uint64_t seq,
+        const char* profilingTitle = nullptr,
+        const std::optional<std::vector<at::Tensor>>& inputs = std::nullopt,
+        bool enableTiming = false,
+        DebugLevel distDebugLevel = DebugLevel::Off);
+
+    // Copy constructor doing partial copy without outputs_. Cleanup thread
+    // monitors and removes finished works. However it will deadlock when
+    // destructs outputs_ tensors who are view tensors in autograd graph.
     WorkXCCL(const WorkXCCL& w);
+
     ~WorkXCCL() override;
 
     bool isAborted();
@@ -326,7 +344,8 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   ProcessGroupXCCL(
       const c10::intrusive_ptr<Store>& store,
       int rank,
-      int size);
+      int size,
+      c10::intrusive_ptr<Options> options = Options::create());
 
   // This constructor includes the deprecated `groupName` argument.
   // If you have existing code that uses the `groupName`, you can replace
@@ -335,9 +354,9 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       const c10::intrusive_ptr<Store>& store,
       int rank,
       int size,
-      const std::string& groupName)
-      : ProcessGroupXCCL(store, rank, size) {}
-
+      const std::string& groupName,
+      c10::intrusive_ptr<Options> options = Options::create())
+      : ProcessGroupXCCL(store, rank, size, options) {}
   ~ProcessGroupXCCL() override;
 
   // This function returns a local uid for ProcessGroupXCCL.
@@ -518,7 +537,10 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       at::Tensor& input,
       at::Tensor& output,
       Fn fn,
-      OpType opType) {
+      OpType opType,
+      const char* profilingTitle = nullptr,
+      bool avoidRecordStreams = false,
+      bool nanCheck = true) {
       return collective<Fn>(
       input,
       output,
@@ -527,7 +549,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
          c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
       [](at::xpu::XPUStream&,
          c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-      opType);
+      opType, profilingTitle, avoidRecordStreams, nanCheck);
   }
 
   template <typename Fn, typename PreProcess, typename PostProcess>
