@@ -375,32 +375,6 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       const std::vector<at::Tensor>& inputs = {},
       const std::vector<at::Tensor>& outputs = {});
 
-  template <typename Fn>
-  c10::intrusive_ptr<Work> collective(
-      at::Tensor& input,
-      at::Tensor& output,
-      Fn fn,
-      OpType opType) {
-      return collective<Fn>(
-      input,
-      output,
-      fn,
-      [](at::xpu::XPUStream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-      [](at::xpu::XPUStream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-      opType);
-  }
-
-  template <typename Fn, typename PreProcess, typename PostProcess>
-  c10::intrusive_ptr<Work> collective(
-      at::Tensor& input,
-      at::Tensor& output,
-      Fn fn,
-      PreProcess pre,
-      PostProcess post,
-      OpType opType);
-
   c10::intrusive_ptr<Work> allreduce(
       std::vector<at::Tensor>& tensors,
       const AllreduceOptions& opts = AllreduceOptions()) override;
@@ -513,12 +487,22 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
   void eagerConnectSingleDevice(at::Device device) override;
 
-//  template <typename Fn>
+//template <typename Fn>
 //  c10::intrusive_ptr<Work> collective(
 //      at::Tensor& input,
 //      at::Tensor& output,
 //      Fn fn,
-//      OpType opType);
+//      OpType opType) {
+//      return collective<Fn>(
+//      input,
+//      output,
+//      fn,
+//      [](at::xpu::XPUStream&,
+//         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+//      [](at::xpu::XPUStream&,
+//         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+//      opType);
+//  }
 //
 //  template <typename Fn, typename PreProcess, typename PostProcess>
 //  c10::intrusive_ptr<Work> collective(
@@ -529,54 +513,32 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 //      PostProcess post,
 //      OpType opType);
 
-  // Helper that encapsulates work shared across all collective communication
-  // primitives.  The callbacks have the following signatures:
-  //
-  //    ncclResult_t fn(at::Tensor& input, at::Tensor& output,
-  //                    cclComm_t, at::cuda::CUDAStream&);
-  //    void {pre,post}(std::vector<at::cuda::CUDAStream&>);
-//  template <typename Fn>
-//  c10::intrusive_ptr<Work> collective(
-//      at::Tensor& input,
-//      at::Tensor& output,
-//      Fn fn,
-//      OpType opType,
-//      const char* profilingTitle = nullptr,
-//      bool avoidRecordStreams = false,
-//      bool nanCheck = true) {
-//      return collective<Fn>(
-//      {input},
-//      {output},
-//      fn,
-//      [](c10::Stream&,
-//         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-//      [](c10::Stream&,
-//         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-//      opType);
-//      }
-//
-//  template <typename Fn, typename PreProcess, typename PostProcess>
-//  c10::intrusive_ptr<Work> collective(
-//      at::Tensor& input,
-//      at::Tensor& output,
-//      Fn fn,
-//      PreProcess pre,
-//      PostProcess post,
-//      OpType opType,
-//      const char* profilingTitle = nullptr,
-//      bool avoidRecordStreams = false,
-//      bool nanCheck = true) {
-//      return collective<Fn>(
-//          {input},
-//          {output},
-//          fn,
-//          [](c10::Stream&,
-//             c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-//          [](c10::Stream&,
-//             c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-//          opType);
-//      }
-//
+  template <typename Fn>
+  c10::intrusive_ptr<Work> collective(
+      at::Tensor& input,
+      at::Tensor& output,
+      Fn fn,
+      OpType opType) {
+      return collective<Fn>(
+      input,
+      output,
+      fn,
+      [](at::xpu::XPUStream&,
+         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+      [](at::xpu::XPUStream&,
+         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+      opType);
+  }
+
+  template <typename Fn, typename PreProcess, typename PostProcess>
+  c10::intrusive_ptr<Work> collective(
+      at::Tensor& input,
+      at::Tensor& output,
+      Fn fn,
+      PreProcess pre,
+      PostProcess post,
+      OpType opType);
+
 //  template <typename Fn, typename PreProcess, typename PostProcess>
 //   c10::intrusive_ptr<Work> collective(
 //      std::vector<at::Tensor>& inputs,
