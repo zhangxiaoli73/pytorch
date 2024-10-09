@@ -309,7 +309,10 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
     Fn fn,
     PreProcess pre,
     PostProcess post,
-    OpType opType) {
+    OpType opType,
+    const char* profilingTitle,
+    bool avoidRecordStreams,
+    bool nanCheck) {
   using traits = function_traits<Fn>;
   using attr_t = typename traits::template arg<2>::type;
   attr_t attr = ccl::create_operation_attr<attr_t>();

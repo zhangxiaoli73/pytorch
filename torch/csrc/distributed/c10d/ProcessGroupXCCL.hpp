@@ -537,7 +537,10 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       Fn fn,
       PreProcess pre,
       PostProcess post,
-      OpType opType);
+      OpType opType,
+      const char* profilingTitle = nullptr,
+      bool avoidRecordStreams = false,
+      bool nanCheck = true);
 
 //  template <typename Fn, typename PreProcess, typename PostProcess>
 //   c10::intrusive_ptr<Work> collective(
