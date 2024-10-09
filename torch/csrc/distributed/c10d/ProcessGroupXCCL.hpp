@@ -284,8 +284,53 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     friend class ProcessGroupXCCL;
   };
 
-  ProcessGroupXCCL(const c10::intrusive_ptr<Store>& store, int rank, int size);
+  struct Options : Backend::Options {
+    // NOTE: timeout in ProcessGroupNCCL::Options denote the timeout for
+    // operations. This is only used when blockingWait_ is enabled.
+    explicit Options(bool is_high_priority_stream = false);
 
+    // return intrusive_ptr of the object
+    static c10::intrusive_ptr<Options> create(
+        bool is_high_priority_stream = false) {
+      return c10::make_intrusive<Options>(is_high_priority_stream);
+    }
+
+    // Schedule XCCL operations on high priority CUDA streams
+    bool is_high_priority_stream;
+
+    std::shared_ptr<ProcessGroupXCCL> split_from;
+    int64_t split_color{0};
+    std::vector<uint64_t> global_ranks_in_group;
+    std::string group_name;
+  };
+
+  class CollectivesImpl {
+    public:
+         static void allreduceImpl(at::Tensor& input, at::Tensor& output, c10::Stream& stream, const AllreduceOptions& opts);
+  };
+
+  // If you wish to create multiple process groups, each with a potentially
+  // different rank and size, you can do so by passing a new store instance
+  // to each one. If you have only a single store object, you can
+  // use the `c10d::PrefixStore` to derive scoped instances.
+  // This is also what the Python API in torch.distributed does.
+  //
+  // The process group instance keeps a reference to the store because
+  // it may be used long after the constructor runs. In fact, the constructor
+  // doesn't create any NCCL communicators. A single NCCL communicator can
+  // only be used on a specific set of devices, and are therefore created
+  // on-demand when a collective runs. If another collective is executed later,
+  // against a different set of devices, the process group creates another NCCL
+  // communicator. These NCCL communicators are cached and reused if possible.
+  //
+  ProcessGroupXCCL(
+      const c10::intrusive_ptr<Store>& store,
+      int rank,
+      int size);
+
+  // This constructor includes the deprecated `groupName` argument.
+  // If you have existing code that uses the `groupName`, you can replace
+  // it by specifying a `c10d::PrefixStore(groupName, store)` for store.
   C10_DEPRECATED ProcessGroupXCCL(
       const c10::intrusive_ptr<Store>& store,
       int rank,
@@ -295,9 +340,29 @@ class TORCH_API ProcessGroupXCCL : public Backend {
 
   ~ProcessGroupXCCL() override;
 
+  // This function returns a local uid for ProcessGroupXCCL.
+  uint64_t getUid() {
+    return static_cast<uint64_t>(local_id_);
+  }
+
+  c10::intrusive_ptr<Options> getOptions() {
+    return options_;
+  }
+
   const std::string getBackendName() const override {
     return std::string(XCCL_BACKEND_NAME);
   }
+
+  bool supportsSplitting() const override {
+    return false;
+  }
+
+  void startCoalescing() override;
+
+  c10::intrusive_ptr<Work> endCoalescing() override;
+
+  // For specifying a composite optype, such as ALLGATHER and REDUCE_SCATTER
+  c10::intrusive_ptr<Work> endCoalescing(OpType optype);
 
   std::shared_ptr<xcclComm_t> getXCCLComm(
       const std::string& deviceKey,
@@ -458,8 +523,127 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       inInitializationCommMap_;
   std::unordered_map<std::string, std::shared_ptr<xcclComm_t>> devXCCLCommMap_;
   c10::intrusive_ptr<Store> store_;
+
+  const c10::intrusive_ptr<Options> options_;
+
+  // The number of NCCL communicators that have been created during
+  // the lifetime of this process group. This sequence number is
+  // used to scope keys used in the store.
+  uint64_t ncclCommCounter_{0};
+
+  // Mutex to guard maps like devNCCLCommMap_.
   std::mutex mutex_;
+
+  // Whether or not we should terminate the watchdog and workCleanup threads.
+  std::atomic<bool> terminateProcessGroup_;
+
+  // Whether or not we should terminate the heartbeat monitoring threads.
+  std::atomic<bool> terminateHeartbeatMonitorThread_;
+
+  // Whether we are in the shutdown mode when we are trying to get debug info,
+  // such as desync report.
+  std::atomic<bool> collectiveDebugInfoMode_;
+
+  // Whether there are hooks pending to be fired
+  std::atomic<bool> hasPendingHooks_;
+
+  // This is the signal from watchdog threads to indicate whether the monitor
+  // thread should dump. Making it static so that it is accessiable from all the
+  // PGs. With this flag, monitor thread would dump debug info under any one of
+  // the three conditions:
+  //
+  // 1: watchdog thread of any PG detects a collective timeout.
+  // 2: timeout signal is received from other ranks through tcpstore.
+  // 3: current PG's watchdog heartbeat timeout occurs.
+  //
+  // Note that only the monitor thread from PG0 will dump the debug info for
+  // case one and two so that the debug info is only dumped once.
+  static std::atomic<bool> shouldDump_;
+
+  // Mutex to Guard workMetaList_
+  std::mutex workMetaListMutex_;
+
+  // Mutex to Guard monitorWakeUpCV_
+  std::mutex monitorMutex_;
+
+  bool writeDebugInfo_ = false;
+
+  // Whether or not to create start CUDAEvent and enable timing for start
+  // and end events. Note that enableTiming_ is always true if desyncDebug_
+  // is set to true.
+  std::atomic<bool> enableTiming_;
+
+  // Condition Variable for watchdog thread sleep
+  std::condition_variable workMetaListCV_;
+
+  // Condition Variable for monitor thread to wake up early
+  std::condition_variable monitorWakeUpCV_;
+
+  // Vector to Store WorkXCCL pointers
+  std::list<ProcessGroupXCCL::WorkXCCL> workMetaList_;
+
+  std::chrono::time_point<std::chrono::steady_clock> lastWorkListUpdateTime_;
+
+  // Mutex to Guard workMetaList_
+  std::mutex completedWorkListMutex_;
+
+  // Condition Variable for watchdog thread sleep
+  std::condition_variable completedWorkListCV_;
+
+  std::list<ProcessGroupXCCL::WorkXCCL> completedWorkList_;
+
+  // Add Work Pointer to workVector
+  void workEnqueue(c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>);
+
+  // The CUDA streams used by NCCL kernels
+  std::unordered_map<std::string, c10::xpu::XPUStream> ncclStreams_;
+
+  // The CUDA events used to sync NCCL streams
+  std::unordered_map<std::string, c10::Event> ncclEvents_;
+
+  // Device Indexes used for all collectives in this group
+  std::set<int> usedDeviceIdxs_;
+
+  // Flag to denote if a coalescing groupStart/groupEnd block is active
+  int coalescing_state_ = 0;
+
+  // Stores device indexes for all collectives run inside a coalescing block
+  at::Device coalescedDevice_ = at::Device("xpu");
+
+  // Stores communicators for all collectives run inside a coalescing block
+  std::shared_ptr<void*> coalescedComm_ = nullptr;
+
+  // Whether or not wait() and synchronize() are blocking operations that wait
+  // for the operation to complete.
   bool blockingWait_ = false;
+
+  // Whether or not TORCH_NCCL_AVOID_RECORD_STREAMS was set
+  bool avoidRecordStreams_ = false;
+
+  // The number of active ncclGroupStart() calls. This counter will be increased
+  // by 1 when ncclGroupStart() is called and decreased by 1 when ncclGroupEnd()
+  // is called.
+  static thread_local uint64_t ncclActiveGroupCounter_;
+
+  // Counting for the sequential number of NCCL collective call.
+  // (specifically, how many actual kernels we launched, which differs from
+  // op_id_ when coalescing is enabled)
+  uint64_t seqCollective_{0};
+
+  // Counting for the sequential number of NCCL P2P calls.
+  uint64_t seqP2P_{0};
+
+  // Incrementing counter for logical operations (collective or p2p) issued on
+  // the ProcessGroup
+  uint64_t op_id_{0};
+
+  // The number of ProcessGroupXCCL created on the current rank.
+  size_t local_id_;
+
+  std::string logPrefix_;
+
+  // Number of devices on this node.
+  int localDeviceCount_{0};
 };
 } // namespace c10d
 
