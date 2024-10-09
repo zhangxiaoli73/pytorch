@@ -380,7 +380,17 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       at::Tensor& input,
       at::Tensor& output,
       Fn fn,
-      OpType opType);
+      OpType opType) {
+      return collective<Fn>(
+      input,
+      output,
+      fn,
+      [](at::xpu::XPUStream&,
+         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+      [](at::xpu::XPUStream&,
+         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+      opType);
+  }
 
   template <typename Fn, typename PreProcess, typename PostProcess>
   c10::intrusive_ptr<Work> collective(
@@ -398,124 +408,263 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   c10::intrusive_ptr<Work> allreduce_coalesced(
       std::vector<at::Tensor>& tensors,
       const AllreduceCoalescedOptions& opts =
-          AllreduceCoalescedOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::allreduce_coalesced not implemented");
-  }
+          AllreduceCoalescedOptions()) override;
 
   c10::intrusive_ptr<Work> reduce(
       std::vector<at::Tensor>& tensors,
-      const ReduceOptions& opts = ReduceOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::reduce not implemented");
-  }
+      const ReduceOptions& opts = ReduceOptions()) override;
 
-  c10::intrusive_ptr<Work> broadcast(
-      std::vector<at::Tensor>& tensors,
-      const BroadcastOptions& opts = BroadcastOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::broadcast not implemented");
-  }
+  c10::intrusive_ptr<Work> _reduce_oop(
+      at::Tensor& outputTensors,
+      at::Tensor& inputTensors,
+      const ReduceOptions& opts = ReduceOptions());
 
   c10::intrusive_ptr<Work> allgather(
       std::vector<std::vector<at::Tensor>>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
-      const AllgatherOptions& opts = AllgatherOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::allgather not implemented");
-  }
+      const AllgatherOptions& opts = AllgatherOptions()) override;
 
   c10::intrusive_ptr<Work> _allgather_base(
       at::Tensor& outputbuffer,
       at::Tensor& inputbuffer,
-      const AllgatherOptions& opts = AllgatherOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::_allgather_base not implemented");
-  }
+      const AllgatherOptions& opts = AllgatherOptions()) override;
 
   c10::intrusive_ptr<Work> allgather_coalesced(
       std::vector<std::vector<at::Tensor>>& outputTensorLists,
       std::vector<at::Tensor>& inputTensors,
-      const AllgatherOptions& opts = AllgatherOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::allgather_coalesced not implemented");
-  }
+      const AllgatherOptions& opts = AllgatherOptions()) override;
 
   c10::intrusive_ptr<Work> allgather_into_tensor_coalesced(
       std::vector<at::Tensor>& outputs,
       std::vector<at::Tensor>& inputs,
-      const AllgatherOptions& opts = AllgatherOptions()) override {
-    TORCH_CHECK(
-        false,
-        "ProcessGroupXCCL::allgather_into_tensor_coalesced not implemented");
-  }
+      const AllgatherOptions& opts = AllgatherOptions()) override;
 
   c10::intrusive_ptr<Work> reduce_scatter(
       std::vector<at::Tensor>& outputTensors,
       std::vector<std::vector<at::Tensor>>& inputTensors,
-      const ReduceScatterOptions& opts = ReduceScatterOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::reduce_scatter not implemented");
-  }
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
   c10::intrusive_ptr<Work> _reduce_scatter_base(
       at::Tensor& outputTensor,
       at::Tensor& inputTensor,
-      const ReduceScatterOptions& opts = ReduceScatterOptions()) override {
-    TORCH_CHECK(
-        false, "ProcessGroupXCCL::_reduce_scatter_base not implemented");
-  }
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
   c10::intrusive_ptr<Work> reduce_scatter_tensor_coalesced(
       std::vector<at::Tensor>& outputs,
       std::vector<at::Tensor>& inputs,
-      const ReduceScatterOptions& opts = ReduceScatterOptions()) override {
-    TORCH_CHECK(
-        false,
-        "ProcessGroupXCCL::reduce_scatter_tensor_coalesced not implemented");
-  }
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
 
   c10::intrusive_ptr<Work> barrier(
-      const BarrierOptions& opts = BarrierOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::barrier not implemented");
-  }
+      const BarrierOptions& opts = BarrierOptions()) override;
 
   c10::intrusive_ptr<Work> alltoall_base(
       at::Tensor& outputTensor,
       at::Tensor& inputTensor,
       std::vector<int64_t>& outputSplitSizes,
       std::vector<int64_t>& inputSplitSizes,
-      const AllToAllOptions& opts = AllToAllOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::alltoall_base not implemented");
-  }
+      const AllToAllOptions& opts = AllToAllOptions()) override;
 
   c10::intrusive_ptr<Work> alltoall(
       std::vector<at::Tensor>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
-      const AllToAllOptions& opts = AllToAllOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::alltoall not implemented");
-  }
+      const AllToAllOptions& opts = AllToAllOptions()) override;
 
   c10::intrusive_ptr<Work> send(
       std::vector<at::Tensor>& tensors,
       int dstRank,
-      int tag) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::send not implemented");
-  }
+      int tag) override;
 
   c10::intrusive_ptr<Work> recv(
       std::vector<at::Tensor>& tensors,
       int srcRank,
-      int tag) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::recv not implemented");
-  }
+      int tag) override;
+
+  void groupStart();
+
+  void groupEnd();
 
   c10::intrusive_ptr<Work> gather(
       std::vector<std::vector<at::Tensor>>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
-      const GatherOptions& opts = GatherOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::gather not implemented");
-  }
+      const GatherOptions& opts = GatherOptions()) override;
 
   c10::intrusive_ptr<Work> scatter(
       std::vector<at::Tensor>& outputTensors,
       std::vector<std::vector<at::Tensor>>& inputTensors,
-      const ScatterOptions& opts = ScatterOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::scatter not implemented");
-  }
+      const ScatterOptions& opts = ScatterOptions()) override;
+
+  // Unsupported Ops
+  c10::intrusive_ptr<Work> recvAnysource(
+      std::vector<at::Tensor>& tensors,
+      int tag) override;
+
+  // Agrees on an initial sequence number for the whole group by having rank 0
+  // create it and broadcast it to other ranks using the store.
+  void setSequenceNumberForGroup() override;
+
+  // Retrieves the current sequence number for the whole group, which should be
+  // in sync. If the returned number is not consistent across the group, it
+  // may indicate that there is some sort of collective desynchronization.
+  uint64_t getSequenceNumberForGroup() override;
+
+  void waitForPendingWorks() override;
+
+  void enableCollectivesTiming() override;
+
+  void eagerConnectSingleDevice(at::Device device) override;
+
+//  template <typename Fn>
+//  c10::intrusive_ptr<Work> collective(
+//      at::Tensor& input,
+//      at::Tensor& output,
+//      Fn fn,
+//      OpType opType);
+//
+//  template <typename Fn, typename PreProcess, typename PostProcess>
+//  c10::intrusive_ptr<Work> collective(
+//      at::Tensor& input,
+//      at::Tensor& output,
+//      Fn fn,
+//      PreProcess pre,
+//      PostProcess post,
+//      OpType opType);
+
+  // Helper that encapsulates work shared across all collective communication
+  // primitives.  The callbacks have the following signatures:
+  //
+  //    ncclResult_t fn(at::Tensor& input, at::Tensor& output,
+  //                    cclComm_t, at::cuda::CUDAStream&);
+  //    void {pre,post}(std::vector<at::cuda::CUDAStream&>);
+//  template <typename Fn>
+//  c10::intrusive_ptr<Work> collective(
+//      at::Tensor& input,
+//      at::Tensor& output,
+//      Fn fn,
+//      OpType opType,
+//      const char* profilingTitle = nullptr,
+//      bool avoidRecordStreams = false,
+//      bool nanCheck = true) {
+//      return collective<Fn>(
+//      {input},
+//      {output},
+//      fn,
+//      [](c10::Stream&,
+//         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+//      [](c10::Stream&,
+//         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+//      opType);
+//      }
+//
+//  template <typename Fn, typename PreProcess, typename PostProcess>
+//  c10::intrusive_ptr<Work> collective(
+//      at::Tensor& input,
+//      at::Tensor& output,
+//      Fn fn,
+//      PreProcess pre,
+//      PostProcess post,
+//      OpType opType,
+//      const char* profilingTitle = nullptr,
+//      bool avoidRecordStreams = false,
+//      bool nanCheck = true) {
+//      return collective<Fn>(
+//          {input},
+//          {output},
+//          fn,
+//          [](c10::Stream&,
+//             c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+//          [](c10::Stream&,
+//             c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+//          opType);
+//      }
+//
+//  template <typename Fn, typename PreProcess, typename PostProcess>
+//   c10::intrusive_ptr<Work> collective(
+//      std::vector<at::Tensor>& inputs,
+//      std::vector<at::Tensor>& outputs,
+//      Fn fn,
+//      PreProcess pre,
+//      PostProcess post,
+//      OpType opType,
+//      const char* profilingTitle = nullptr,
+//      bool avoidRecordStreams = false,
+//      bool nanCheck = true);
+
+//  template <typename Fn>
+//   c10::intrusive_ptr<Work> collectiveCoalesced(
+//      std::vector<at::Tensor>& input,
+//      std::vector<at::Tensor>& output,
+//      Fn fn,
+//      OpType opType,
+//      const char* profilingTitle = nullptr,
+//      bool avoidRecordStreams = false);
+//
+//  // Helper that encapsulates work shared across point-to-point communication
+//  // primitives. It is the same structure as the helper used for collective
+//  // communication primitives.
+//  template <typename Fn>
+//  c10::intrusive_ptr<Work> pointToPoint(
+//      at::Tensor& tensor,
+//      Fn fn,
+//      int peer,
+//      OpType opType,
+//      const char* profilingTitle = nullptr) {
+//      return collective<Fn>(
+//          tensor,
+//          fn,
+//          peer,
+//          opType,
+//          [](c10::Stream&,
+//             c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+//          [](c10::Stream&,
+//             c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
+//          opType, profilingTitle);
+//   }
+//
+//  template <typename Fn, typename PreProcess, typename PostProcess>
+//   c10::intrusive_ptr<Work> pointToPoint(
+//      at::Tensor& tensor,
+//      Fn fn,
+//      int peer,
+//      OpType opType,
+//      PreProcess pre,
+//      PostProcess post,
+//      const char* profilingTitle = nullptr);
+
+  // Util function to assign timeout to each work.
+  void assignTimeoutToWork(
+      const c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work,
+      const c10::intrusive_ptr<Options>& option);
+
+  // Generates a prefix that is unique to this process group and rank, for
+  // disambiguating logs
+  std::string createLogPrefix() const;
+
+  // Returns the unique prefix created in createLogPrefix
+  const std::string& logPrefix() const;
+
+    // Returns the global rank of the device. This function assumes that users
+  // always create a default global process group(PG) which includes all
+  // devices. It is called in the constructor of ProcessGroupNCCL, so it always
+  // return the rank_ of the the very first PG created, aka, default global PG.
+  const int& globalRank() const;
+
+  // Returns the global ranks of a PG.
+  const std::vector<uint64_t>& groupRanks() const;
+
+  bool complexViewAsRealAllowed(const ReduceOp reduceOp);
+
+  bool abort(std::optional<std::string> abortReason = std::nullopt);
+  void shutdown(std::optional<std::string> reason = std::nullopt);
+
+ protected:
+  // In the timeout case and we will dump debug info such as the NCCL flight
+  // recorder to storage. Down the road, if we have more complicated or blocking
+  // operations, we might need to use a side thread to do it.
+  bool dumpDebuggingInfo();
+
+ private:
+  int globalRankStart;
+  int globalRankStride;
 
  protected:
   std::unordered_map<std::string, at::xpu::XPUStream> xcclStreams_;

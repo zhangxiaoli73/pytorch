@@ -347,23 +347,6 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   return work;
 }
 
-template <typename Fn>
-c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
-    at::Tensor& input,
-    at::Tensor& output,
-    Fn fn,
-    OpType opType) {
-  return collective<Fn>(
-      input,
-      output,
-      fn,
-      [](at::xpu::XPUStream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-      [](at::xpu::XPUStream&,
-         c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>& work) {},
-      opType);
-}
-
 c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
     std::vector<at::Tensor>& tensors,
     const AllreduceOptions& opts) {
