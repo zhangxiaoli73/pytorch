@@ -64,9 +64,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
           false, "ProcessGroupXCCL::WorkXCCL::isSuccess not implemented");
     }
 
-    void abort() override {
-      TORCH_CHECK(false, "ProcessGroupXCCL::WorkXCCL::abort not implemented");
-    }
+    void abort() override;
 
     void synchronize() override;
 
@@ -157,6 +155,23 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       auto inputs = std::vector<at::Tensor>{input};
       auto outputs = std::vector<at::Tensor>{output};
       return collective(inputs, outputs, fn, pre, post, opType);
+  }
+
+  template <typename Fn>
+  c10::intrusive_ptr<Work> collective(
+      std::vector<at::Tensor>& inputs,
+      std::vector<at::Tensor>& outputs,
+      Fn fn,
+      OpType opType) {
+      return collective<Fn>(
+      inputs,
+      outputs,
+      fn,
+      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
+      },
+      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
+      },
+      opType);
   }
 
   template <typename Fn, typename PreProcess, typename PostProcess>
@@ -322,8 +337,6 @@ class TORCH_API ProcessGroupXCCL : public Backend {
  protected:
   std::unordered_map<std::string, at::xpu::XPUStream> xcclStreams_;
   std::unordered_map<std::string, at::xpu::XPUEvent> xcclEvents_;
-  std::unordered_map<std::string, std::shared_ptr<xcclComm_t>>
-      inInitializationCommMap_;
   std::unordered_map<std::string, std::shared_ptr<xcclComm_t>> devXCCLCommMap_;
   c10::intrusive_ptr<Store> store_;
   std::mutex mutex_;
