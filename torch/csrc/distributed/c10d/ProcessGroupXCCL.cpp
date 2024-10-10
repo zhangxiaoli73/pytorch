@@ -19,15 +19,6 @@ namespace c10d {
 
 namespace {
 
-// wait nonblocking implement
-AutoXcclGroup::AutoXcclGroup() {
-  ccl::group_start();
-}
-
-AutoXcclGroup::~AutoXcclGroup() noexcept(false) {
-  ccl::group_end();
-}
-
 std::map<c10d::ReduceOp, ccl::reduction> xcclOps = {
     {ReduceOp::MIN, ccl::reduction::min},
     {ReduceOp::MAX, ccl::reduction::max},
@@ -492,106 +483,14 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   for (const auto& input : inputs) {
     c10::xpu::XPUCachingAllocator::recordStream(
         input.storage().data_ptr(), stream);
+    fn(inputs[i], outputs[i], attr, *comm, stream)
   }
-
-  fn(inputs[0], outputs[0], attr, *comm, stream);
 
   post(stream, work);
 
   if (!coalescing_state_) {
     work->xcclEndEvent_->record(stream);
   }
-
-  std::vector<c10::Stream> streams = {stream.unwrap()};
-  c10::MultiStreamGuard streamGuard(streams);
-  std::vector<at::Device> devices{device};
-  work->future_ = c10::make_intrusive<at::ivalue::Future>(
-      c10::ListType::create(c10::TensorType::get()), devices);
-  work->future_->markCompleted(at::IValue(*work->outputs_));
-  work->blockingWait_ = blockingWait_;
-
-  return work;
-}
-
-template <typename Fn, typename PreProcess, typename PostProcess>
-c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
-    at::Tensor& input,
-    at::Tensor& output,
-    Fn fn,
-    PreProcess pre,
-    PostProcess post,
-    OpType opType) {
-  auto inputs = std::vector<at::Tensor>{input};
-  auto outputs = std::vector<at::Tensor>{output};
-  return collective(inputs, outputs, fn, pre, post, opType);
-}
-
-template <typename Fn>
-c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
-    at::Tensor& input,
-    at::Tensor& output,
-    Fn fn,
-    OpType opType) {
-  return collective<Fn>(
-      input,
-      output,
-      fn,
-      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
-      },
-      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
-      },
-      opType);
-}
-
-template <typename Fn>
-c10::intrusive_ptr<Work> ProcessGroupXCCL::collectiveCoalesced(
-    std::vector<at::Tensor>& inputs,
-    std::vector<at::Tensor>& outputs,
-    Fn fn,
-    OpType opType) {
-  using traits = function_traits<Fn>;
-  using attr_t = typename traits::template arg<2>::type;
-  attr_t attr = ccl::create_operation_attr<attr_t>();
-
-  auto device = inputs[0].device();
-  const auto key = std::to_string(device.index());
-  auto comm = getXCCLComm(key, device, opType);
-
-  if (coalescing_state_ & CoalActive) {
-    coalescing_state_ |= CoalColl;
-    if (coalescedDevice_.index() < 0) {
-      coalescedDevice_ = device;
-    } else {
-      TORCH_CHECK(
-          coalescedDevice_.index() == device.index(), MULTI_DEVICE_ERROR_MSG);
-    }
-    if (coalescedComm_ == nullptr) {
-      coalescedComm_ = comm;
-    } else {
-      TORCH_CHECK(coalescedComm_ == comm, MULTI_DEVICE_ERROR_MSG);
-    }
-  }
-
-  auto stream = xcclStreams_.at(key);
-  syncStream(device, xcclEvents_[key], stream);
-
-  c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
-  work = initWork(device, rank_, opType);
-
-  work->outputs_ = std::make_shared<std::vector<at::Tensor>>(outputs);
-
-  at::xpu::OptionalXPUGuard gpuGuard(device);
-
-  {
-    AutoXcclGroup xccl_group_guard;
-    for (const auto i : c10::irange(inputs.size())) {
-      c10::xpu::XPUCachingAllocator::recordStream(
-          inputs[i].storage().data_ptr(), stream);
-      fn(inputs[i], outputs[i], attr, *comm, stream);
-    }
-  }
-
-  work->xcclEndEvent_->record(stream);
 
   std::vector<c10::Stream> streams = {stream.unwrap()};
   c10::MultiStreamGuard streamGuard(streams);
@@ -691,22 +590,6 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::pointToPoint(
   } else {
     return nullptr;
   }
-}
-
-template <typename Fn>
-c10::intrusive_ptr<Work> ProcessGroupXCCL::pointToPoint(
-    at::Tensor& tensor,
-    Fn fn,
-    int peer,
-    OpType opType) {
-  return pointToPoint(
-      tensor,
-      fn,
-      peer,
-      opType,
-      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
-      },
-      [](at::xpu::XPUStream&) {});
 }
 
 c10::intrusive_ptr<Work> ProcessGroupXCCL::send(
