@@ -207,25 +207,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       at::Tensor& tensor,
       Fn fn,
       int peer,
-      OpType opType) {
-    return pointToPoint(
-      tensor,
-      fn,
-      peer,
-      opType,
-      [](at::xpu::XPUStream&, c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
-      },
-      [](at::xpu::XPUStream&) {});
-  }
-
-  template <typename Fn, typename PreProcess, typename PostProcess>
-  c10::intrusive_ptr<Work> pointToPoint(
-      at::Tensor& tensor,
-      Fn fn,
-      int peer,
-      OpType opType,
-      PreProcess pre,
-      PostProcess post);
+      OpType opType);
 
   c10::intrusive_ptr<Work> allreduce_impl(
       at::Tensor& tensor,

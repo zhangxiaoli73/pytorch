@@ -416,7 +416,6 @@ void ProcessGroupXCCL::groupEnd() {
   --xcclActiveGroupCounter_;
 }
 
-// TODO: wait p2p enable
 static constexpr int CoalActive = 0x01, CoalColl = 0x02, CoalP2P = 0x04;
 void ProcessGroupXCCL::startCoalescing() {
   coalescedDevice_.set_index(-1);
@@ -525,14 +524,12 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   return work;
 }
 
-template <typename Fn, typename PreProcess, typename PostProcess>
+template <typename Fn>
 c10::intrusive_ptr<Work> ProcessGroupXCCL::pointToPoint(
     at::Tensor& tensor,
     Fn fn,
     int peer,
-    OpType opType,
-    PreProcess pre,
-    PostProcess post) {
+    OpType opType) {
   using traits = function_traits<Fn>;
   using attr_t = typename traits::template arg<1>::type;
   attr_t attr = ccl::create_operation_attr<attr_t>();
@@ -576,40 +573,36 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::pointToPoint(
   auto stream = xcclStreams_.at(key);
   syncStream(device, xcclEvents_[key], stream);
 
-  c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
   if (!coalescing_state_) {
+    c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> work;
     work = initWork(device, rank_, opType);
     work->outputs_ = std::make_shared<std::vector<at::Tensor>>();
     work->outputs_->push_back(tensor);
-  }
 
-  at::xpu::OptionalXPUGuard gpuGuard(device);
+    at::xpu::OptionalXPUGuard gpuGuard(device);
 
-  if (!coalescing_state_) {
-    pre(stream, work);
-  }
-
-  c10::xpu::XPUCachingAllocator::recordStream(
+    c10::xpu::XPUCachingAllocator::recordStream(
       tensor.storage().data_ptr(), stream);
 
-  fn(tensor, attr, *comm, stream, p2pTargetRank);
-
-  if (!coalescing_state_) {
-    post(stream);
+    fn(tensor, attr, *comm, stream, p2pTargetRank);
 
     work->xcclEndEvent_->record(stream);
     work->blockingWait_ = blockingWait_;
-
-    {
-      std::vector<c10::Stream> streams = {stream.unwrap()};
-      c10::MultiStreamGuard streamGuard(streams);
-      std::vector<at::Device> devices{device};
-      work->future_ = c10::make_intrusive<at::ivalue::Future>(
-          c10::ListType::create(c10::TensorType::get()), devices);
-      work->future_->markCompleted(at::IValue(*work->outputs_));
-    }
+    std::vector<c10::Stream> streams = {stream.unwrap()};
+    c10::MultiStreamGuard streamGuard(streams);
+    std::vector<at::Device> devices{device};
+    work->future_ = c10::make_intrusive<at::ivalue::Future>(
+      c10::ListType::create(c10::TensorType::get()), devices);
+    work->future_->markCompleted(at::IValue(*work->outputs_));
     return work;
   } else {
+    at::xpu::OptionalXPUGuard gpuGuard(device);
+
+    c10::xpu::XPUCachingAllocator::recordStream(
+      tensor.storage().data_ptr(), stream);
+
+    fn(tensor, attr, *comm, stream, p2pTargetRank);
+
     return nullptr;
   }
 }
