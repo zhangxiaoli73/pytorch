@@ -13090,7 +13090,7 @@
   structured: True
   structured_inherits: TensorIteratorBase
   dispatch:
-    CPU, CUDA: isposinf_out
+    CPU, CUDA, MPS: isposinf_out
     SparseCPU, SparseCUDA: isposinf_sparse_out
     SparseCsrCPU, SparseCsrCUDA, SparseCsrMeta: isposinf_sparse_csr_out
   tags: pointwise
@@ -13107,7 +13107,7 @@
   structured: True
   structured_inherits: TensorIteratorBase
   dispatch:
-    CPU, CUDA: isneginf_out
+    CPU, CUDA, MPS: isneginf_out
     SparseCPU, SparseCUDA: isneginf_sparse_out
     SparseCsrCPU, SparseCsrCUDA, SparseCsrMeta: isneginf_sparse_csr_out
   tags: pointwise
@@ -13120,7 +13120,7 @@
   variants: function
 
 # See NOTE [_add_batch_dim and _remove_batch_dim]
-- func: _remove_batch_dim(Tensor self, int level, int batch_size, int out_dim) -> Tensor
+- func: _remove_batch_dim(Tensor self, int level, SymInt batch_size, int out_dim) -> Tensor
   variants: function
 
 ## Functions related to the `torch.special` namespace

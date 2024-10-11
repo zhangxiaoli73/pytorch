@@ -330,6 +330,13 @@ def _rebuild_nested_tensor(buffer, sizes, strides, storage_offsets):
     return torch._nested_view_from_buffer(buffer, sizes, strides, storage_offsets)
 
 
+def _rebuild_device_tensor_from_cpu_tensor(data, dtype, device, requires_grad):
+    device = _get_restore_location(device)
+    tensor = data.to(dtype=dtype, device=device)
+    tensor.requires_grad = requires_grad
+    return tensor
+
+
 def _rebuild_device_tensor_from_numpy(data, dtype, device, requires_grad):
     device = _get_restore_location(device)
     tensor = torch.from_numpy(data).to(dtype=dtype, device=device)
@@ -904,7 +911,9 @@ def _functionalize_sync(t):
 
 
 @functools.lru_cache(2)
-def _get_device_module(device_type: str):
+def _get_device_module(device_type: Optional[str] = None):
+    if device_type is None:
+        device_type = torch._C._get_accelerator().type
     device_module = getattr(torch, device_type, None)
     if device_module is None:
         raise RuntimeError(
