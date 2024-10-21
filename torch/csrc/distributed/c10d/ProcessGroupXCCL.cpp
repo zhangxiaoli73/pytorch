@@ -1060,7 +1060,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_allgather_base(
   TORCH_CHECK_WITH(
       TypeError,
       input_tensor.dtype() == output_tensor.dtype(),
-      "output tensor must have the same type as input tensor");
+      "input tensor must be the same type as the output tensor.");
   TORCH_CHECK_WITH(
       ValueError,
       input_tensor.numel() * size_ == output_tensor.numel(),
@@ -1189,7 +1189,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_reduce_scatter_base(
   TORCH_CHECK_WITH(
       TypeError,
       inputTensor.dtype() == outputTensor.dtype(),
-      "output tensor must have the same type as input tensor");
+      "input tensor must be the same type as the output tensor.");
   TORCH_CHECK_WITH(
       ValueError,
       inputTensor.numel() == outputTensor.numel() * size_,
