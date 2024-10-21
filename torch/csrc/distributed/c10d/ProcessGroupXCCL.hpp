@@ -1,33 +1,24 @@
 #pragma once
 
-#if defined(__linux__)
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-#endif
-
 #ifdef USE_C10D_XCCL
-#include <ATen/xpu/XPUEvent.h>
-#include <oneapi/ccl.hpp>
-#include <torch/csrc/distributed/c10d/Store.hpp>
-#include <exception>
-#include <memory>
-#include <vector>
+// We will define those flags in XCCL backend file instead of passing to gcc
+// compiler.
+#define CCL_ENABLE_ZE
+#define CCL_ENABLE_SYCL
 
-#include <atomic>
-#include <chrono>
+#include <oneapi/ccl.hpp>
+#include <exception>
 #include <future>
-#include <iostream>
 #include <list>
 #include <mutex>
-#include <thread>
 #include <unordered_map>
+#include <vector>
 
+#include <ATen/xpu/XPUEvent.h>
 #include <c10/core/StreamGuard.h>
 #include <c10/xpu/XPUCachingAllocator.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
-#include <torch/csrc/distributed/c10d/PrefixStore.hpp>
+#include <torch/csrc/distributed/c10d/Store.hpp>
 namespace c10d {
 
 namespace {
@@ -42,7 +33,6 @@ static std::vector<std::string> TORCH_XCCL_BLOCKING_WAIT = {
     "XCCL_BLOCKING_WAIT"};
 
 using xcclComm_t = ccl::communicator;
-using XCCL_KVS = ccl::shared_ptr_class<ccl::kvs>;
 constexpr const char* XCCL_BACKEND_NAME = "xccl";
 
 class TORCH_API ProcessGroupXCCL : public Backend {
@@ -53,16 +43,13 @@ class TORCH_API ProcessGroupXCCL : public Backend {
         at::Device& device,
         int rank,
         OpType opType,
+        uint64_t seq,
+        const char* profilingTitle = nullptr,
         const std::optional<std::vector<at::Tensor>>& inputs = std::nullopt);
     WorkXCCL(const WorkXCCL& w);
     ~WorkXCCL() override;
 
     bool isCompleted() override;
-
-    bool isSuccess() const override {
-      TORCH_CHECK(
-          false, "ProcessGroupXCCL::WorkXCCL::isSuccess not implemented");
-    }
 
     void abort() override {
       TORCH_CHECK(false, "ProcessGroupXCCL::WorkXCCL::abort not implemented");
@@ -76,6 +63,10 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       return future_;
     }
 
+    uint64_t getSequencenumber() const override {
+      return seq_;
+    }
+
     std::vector<at::Tensor> result() override {
       return *outputs_;
     }
@@ -86,6 +77,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     at::Tensor barrierTensor_;
     bool blockingWait_ = false;
     std::chrono::time_point<std::chrono::steady_clock> workStartTime_;
+    uint64_t seq_;
 
    private:
     void synchronizeInternal(std::chrono::milliseconds timeout);
@@ -126,6 +118,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       at::Device& device,
       int rank,
       OpType opType,
+      const char* profilingTitle = nullptr,
       const std::vector<at::Tensor>& inputs = {},
       const std::vector<at::Tensor>& outputs = {});
 
@@ -134,16 +127,30 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       at::Tensor& input,
       at::Tensor& output,
       Fn fn,
-      OpType opType);
+      OpType opType,
+      const char* profilingTitle = nullptr) {
+    auto inputs = std::vector<at::Tensor>{input};
+    auto outputs = std::vector<at::Tensor>{output};
+    return collective<Fn>(
+        inputs,
+        outputs,
+        fn,
+        [](at::xpu::XPUStream&,
+           c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {},
+        [](at::xpu::XPUStream&,
+           c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {},
+        opType);
+  }
 
   template <typename Fn, typename PreProcess, typename PostProcess>
   c10::intrusive_ptr<Work> collective(
-      at::Tensor& input,
-      at::Tensor& output,
+      std::vector<at::Tensor>& inputs,
+      std::vector<at::Tensor>& outputs,
       Fn fn,
       PreProcess pre,
       PostProcess post,
-      OpType opType);
+      OpType opType,
+      const char* profilingTitle = nullptr);
 
   template <typename Fn, typename PreProcess, typename PostProcess>
   c10::intrusive_ptr<Work> collective(
@@ -218,13 +225,6 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       at::Tensor& inputbuffer,
       const AllgatherOptions& opts = AllgatherOptions()) override;
 
-  c10::intrusive_ptr<Work> allgather_coalesced(
-      std::vector<std::vector<at::Tensor>>& outputTensorLists,
-      std::vector<at::Tensor>& inputTensors,
-      const AllgatherOptions& opts = AllgatherOptions()) override {
-    TORCH_CHECK(false, "ProcessGroupXCCL::allgather_coalesced not implemented");
-  }
-
   c10::intrusive_ptr<Work> allgather_into_tensor_coalesced(
       std::vector<at::Tensor>& outputs,
       std::vector<at::Tensor>& inputs,
@@ -298,10 +298,13 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   std::shared_ptr<xcclComm_t> coalescedComm_ = nullptr;
   bool blockingWait_ = false;
   static thread_local uint64_t xcclActiveGroupCounter_;
+  uint64_t seqCollective_{0};
+
  private:
-  XCCL_KVS kvs;
   std::mutex kvs_mutex;
-  XCCL_KVS get_kvs(int rank, c10d::Store& store) {
+  ccl::shared_ptr_class<ccl::kvs> kvs;
+
+  ccl::shared_ptr_class<ccl::kvs> get_kvs(int rank, c10d::Store& store) {
     std::lock_guard<std::mutex> lock(kvs_mutex);
     if (kvs)
       return kvs;
@@ -326,41 +329,6 @@ class TORCH_API ProcessGroupXCCL : public Backend {
     return kvs;
   }
 };
-
-namespace {
-int getXCCLEnvVar(std::string envVarName) {
-  char* stringValue = std::getenv(envVarName.c_str());
-  if (stringValue != nullptr) {
-    try {
-      int val = std::stoi(stringValue);
-      return val;
-    } catch (std::exception& e) {
-      TORCH_CHECK(
-          false,
-          "Invalid value for environment variable: " + std::string(envVarName));
-    }
-  } else {
-    return -1;
-  }
-}
-
-template <typename T>
-void setXCCLEnvVar(const std::string& envVarName, T val) {
-  if constexpr (std::is_same_v<T, int>) {
-    setenv(envVarName.c_str(), std::to_string(val).c_str(), 1);
-  } else if constexpr (std::is_same_v<T, std::string>) {
-    setenv(envVarName.c_str(), val.c_str(), 1);
-  }
-}
-
-bool with_mpirun() {
-  return (getenv("MPI_LOCALRANKID") || getenv("MPI_LOCALNRANKS") ||
-          getenv("PMI_RANK") || getenv("PMI_SIZE") || getenv("PMIX_RANK"))
-      ? true
-      : false;
-}
-
-} // namespace
 } // namespace c10d
 
 #endif // USE_C10D_XCCL
