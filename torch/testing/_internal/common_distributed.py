@@ -95,7 +95,7 @@ class DistTestCases:
     backend_feature = {}
     backend_feature["gpu"] = {"nccl", "gloo", "ucc", "xccl"}
     backend_feature["cuda"] = {"nccl", "gloo", "ucc"}
-    backend_feature["cuda"] = {"xccl"}
+    backend_feature["xpu"] = {"xccl"}
     backend_feature["ddp"] = {"nccl", "gloo", "ucc"}
     backend_feature["subgroup"] = {"nccl", "gloo", "ucc"}
     backend_feature["plugin"] = set()
@@ -466,9 +466,9 @@ def simple_sparse_reduce_tests(rank: int, world_size: int, num_inputs: int = 1):
 # Returns the number of GPUs, currently only for CUDA and XPU.
 def get_device_count(backend: str):
     assert c10d.is_backend_available(backend)
-    if backend in backend_feature.get("cuda", set()):
+    if backend in DistTestCases.backend_feature.get("cuda", set()):
         return torch.cuda.device_count()
-    elif backend in backend_feature.get("xpu", set()):
+    elif backend in DistTestCases.backend_feature.get("xpu", set()):
         return torch.xpu.device_count()
     else:
         raise ValueError(f"Unsupported backend: {backend}")

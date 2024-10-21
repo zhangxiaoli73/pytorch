@@ -127,9 +127,10 @@ int64_t check_xpu_tensors_same_device(const std::vector<at::Tensor>& tensors) {
 ccl::datatype getXcclDataType(
     at::ScalarType type,
     bool is_reduction_op = false) {
-  TORCH_CHECK(
-      !isFloat8Type(type) && is_reduction_op,
-      "Float8 dtypes are not currenlty supported for XCCL reductions");
+  if (is_reduction_op)
+    TORCH_CHECK(
+        !isFloat8Type(type),
+        "Float8 dtypes are not currenlty supported for XCCL reductions");
   auto it = xcclDatatypes.find(type);
   TORCH_CHECK_WITH(
       TypeError,
@@ -958,7 +959,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_reduce_oop(
     const ReduceOptions& opts) {
   TORCH_CHECK_WITH(
       ValueError,
-      outputTensor.numel() != inputTensor.numel(),
+      outputTensor.numel() == inputTensor.numel(),
       "Tensor input and output of _reduce_oop must have the same number of elements");
   return collective(
       inputTensor,
@@ -1058,11 +1059,11 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_allgather_base(
 
   TORCH_CHECK_WITH(
       TypeError,
-      input_tensor.dtype() != output_tensor.dtype(),
+      input_tensor.dtype() == output_tensor.dtype(),
       "output tensor must have the same type as input tensor");
   TORCH_CHECK_WITH(
       ValueError,
-      input_tensor.numel() * size_ != output_tensor.numel(),
+      input_tensor.numel() * size_ == output_tensor.numel(),
       "output tensor size must be equal to world_size times input tensor size");
 
   return collective(
@@ -1187,12 +1188,12 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_reduce_scatter_base(
     const ReduceScatterOptions& opts) {
   TORCH_CHECK_WITH(
       TypeError,
-      inputTensor.dtype() != outputTensor.dtype(),
+      inputTensor.dtype() == outputTensor.dtype(),
       "output tensor must have the same type as input tensor");
   TORCH_CHECK_WITH(
       ValueError,
-      inputTensor.numel() != outputTensor.numel() * size_,
-      "input tensor size must be equal to world_size times output tensor size");
+      inputTensor.numel() == outputTensor.numel() * size_,
+      "input tensor must be the same size as output size times world size");
 
   return collective(
       inputTensor,
