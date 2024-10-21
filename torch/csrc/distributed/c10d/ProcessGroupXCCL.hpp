@@ -21,18 +21,12 @@
 #include <torch/csrc/distributed/c10d/Store.hpp>
 namespace c10d {
 
-namespace {
-struct AutoXcclGroup {
-  AutoXcclGroup();
-  ~AutoXcclGroup() noexcept(false);
-};
-} // namespace
-
 static std::vector<std::string> TORCH_XCCL_BLOCKING_WAIT = {
     "TORCH_XCCL_BLOCKING_WAIT",
     "XCCL_BLOCKING_WAIT"};
 
 using xcclComm_t = ccl::communicator;
+using XCCL_KVS = ccl::shared_ptr_class<ccl::kvs>;
 constexpr const char* XCCL_BACKEND_NAME = "xccl";
 
 class TORCH_API ProcessGroupXCCL : public Backend {
@@ -129,8 +123,39 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       Fn fn,
       OpType opType,
       const char* profilingTitle = nullptr) {
+    return collective<Fn>(
+        input,
+        output,
+        fn,
+        [](at::xpu::XPUStream&,
+           c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {},
+        [](at::xpu::XPUStream&,
+           c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {},
+        opType,
+        profilingTitle);
+  }
+
+  template <typename Fn, typename PreProcess, typename PostProcess>
+  c10::intrusive_ptr<Work> collective(
+      at::Tensor& input,
+      at::Tensor& output,
+      Fn fn,
+      PreProcess pre,
+      PostProcess post,
+      OpType opType,
+      const char* profilingTitle = nullptr) {
     auto inputs = std::vector<at::Tensor>{input};
     auto outputs = std::vector<at::Tensor>{output};
+    return collective(inputs, outputs, fn, pre, post, opType, profilingTitle);
+  }
+
+  template <typename Fn>
+  c10::intrusive_ptr<Work> collective(
+      std::vector<at::Tensor>& inputs,
+      std::vector<at::Tensor>& outputs,
+      Fn fn,
+      OpType opType,
+      const char* profilingTitle = nullptr) {
     return collective<Fn>(
         inputs,
         outputs,
@@ -139,7 +164,8 @@ class TORCH_API ProcessGroupXCCL : public Backend {
            c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {},
         [](at::xpu::XPUStream&,
            c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {},
-        opType);
+        opType,
+        profilingTitle);
   }
 
   template <typename Fn, typename PreProcess, typename PostProcess>
@@ -152,37 +178,36 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       OpType opType,
       const char* profilingTitle = nullptr);
 
-  template <typename Fn, typename PreProcess, typename PostProcess>
-  c10::intrusive_ptr<Work> collective(
-      std::vector<at::Tensor>& inputs,
-      std::vector<at::Tensor>& outputs,
-      Fn fn,
-      PreProcess pre,
-      PostProcess post,
-      OpType opType);
-
   template <typename Fn>
   c10::intrusive_ptr<Work> collectiveCoalesced(
       std::vector<at::Tensor>& input,
       std::vector<at::Tensor>& output,
       Fn fn,
-      OpType opType);
+      OpType opType,
+      const char* profilingTitle = nullptr) {
+    return collective<Fn>(
+        input,
+        output,
+        fn,
+        [](at::xpu::XPUStream&,
+           c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
+          ccl::group_start();
+        },
+        [](at::xpu::XPUStream&,
+           c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL>&) {
+          ccl::group_end();
+        },
+        opType,
+        profilingTitle);
+  }
 
   template <typename Fn>
   c10::intrusive_ptr<Work> pointToPoint(
       at::Tensor& tensor,
       Fn fn,
       int peer,
-      OpType opType);
-
-  template <typename Fn, typename PreProcess, typename PostProcess>
-  c10::intrusive_ptr<Work> pointToPoint(
-      at::Tensor& tensor,
-      Fn fn,
-      int peer,
       OpType opType,
-      PreProcess pre,
-      PostProcess post);
+      const char* profilingTitle = nullptr);
 
   c10::intrusive_ptr<Work> allreduce_impl(
       at::Tensor& tensor,
@@ -285,10 +310,8 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       const ScatterOptions& opts = ScatterOptions()) override;
 
  protected:
-  std::unordered_map<std::string, at::xpu::XPUStream> xcclStreams_;
-  std::unordered_map<std::string, at::xpu::XPUEvent> xcclEvents_;
-  std::unordered_map<std::string, std::shared_ptr<xcclComm_t>>
-      inInitializationCommMap_;
+  std::unordered_map<std::string, at::xpu::XPUStream> xcclStreamsMap_;
+  std::unordered_map<std::string, at::xpu::XPUEvent> xcclEventsMap_;
   std::unordered_map<std::string, std::shared_ptr<xcclComm_t>> devXCCLCommMap_;
   c10::intrusive_ptr<Store> store_;
   std::mutex mutex_;
