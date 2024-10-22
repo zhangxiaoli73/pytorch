@@ -19,6 +19,8 @@
 #include <c10/xpu/XPUCachingAllocator.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
+#include <torch/csrc/distributed/c10d/ProcessGroupCCL.hpp>
+
 namespace c10d {
 
 static std::vector<std::string> TORCH_XCCL_BLOCKING_WAIT = {
@@ -31,52 +33,24 @@ constexpr const char* XCCL_BACKEND_NAME = "xccl";
 
 class TORCH_API ProcessGroupXCCL : public Backend {
  public:
-  class WorkXCCL : public Work {
+  class WorkXCCL : public WorkCCL {
    public:
     WorkXCCL(
+        const std::string& pgUID,
+        const std::string& pgDesc,
         at::Device& device,
         int rank,
         OpType opType,
         uint64_t seq,
         const char* profilingTitle = nullptr,
-        const std::optional<std::vector<at::Tensor>>& inputs = std::nullopt);
-    WorkXCCL(const WorkXCCL& w);
+        const std::optional<std::vector<at::Tensor>>& inputs = std::nullopt,
+        bool desyncDebug = false,
+        bool enableTiming = false,
+        bool cudaEventCacheEnabled = false,
+        DebugLevel distDebugLevel = DebugLevel::Off);
     ~WorkXCCL() override;
 
-    bool isCompleted() override;
-
-    void abort() override {
-      TORCH_CHECK(false, "ProcessGroupXCCL::WorkXCCL::abort not implemented");
-    }
-
-    void synchronize() override;
-
-    bool wait(std::chrono::milliseconds timeout = kNoTimeout) override;
-
-    c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
-      return future_;
-    }
-
-    uint64_t getSequencenumber() const override {
-      return seq_;
-    }
-
-    std::vector<at::Tensor> result() override {
-      return *outputs_;
-    }
-
-   protected:
-    at::Device device_;
-    std::shared_ptr<at::xpu::XPUEvent> xcclEndEvent_;
-    at::Tensor barrierTensor_;
-    bool blockingWait_ = false;
-    std::chrono::time_point<std::chrono::steady_clock> workStartTime_;
-    uint64_t seq_;
-
    private:
-    void synchronizeInternal(std::chrono::milliseconds timeout);
-    std::shared_ptr<std::vector<at::Tensor>> outputs_;
-    c10::intrusive_ptr<at::ivalue::Future> future_;
     friend class ProcessGroupXCCL;
   };
 

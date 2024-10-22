@@ -169,68 +169,21 @@ constexpr int64_t kSynchronizeBusyWaitMillis = 10;
 thread_local uint64_t ProcessGroupXCCL::xcclActiveGroupCounter_ = 0;
 
 ProcessGroupXCCL::WorkXCCL::WorkXCCL(
-    at::Device& device,
-    int rank,
-    OpType opType,
-    uint64_t seq,
-    const char* profilingTitle,
-    const std::optional<std::vector<at::Tensor>>& inputs)
-    : Work(rank, opType, profilingTitle, inputs),
-      device_(device),
-      workStartTime_(std::chrono::steady_clock::now()),
-      seq_(seq) {
-  xcclEndEvent_ = std::make_shared<at::xpu::XPUEvent>();
-}
-
-ProcessGroupXCCL::WorkXCCL::WorkXCCL(const WorkXCCL& w)
-    : Work(w.rank_, w.opType_),
-      device_(w.device_),
-      xcclEndEvent_(w.xcclEndEvent_),
-      blockingWait_(w.blockingWait_),
-      workStartTime_(w.workStartTime_),
-      seq_(w.seq_) {}
+        const std::string& pgUID,
+        const std::string& pgDesc,
+        at::Device& device,
+        int rank,
+        OpType opType,
+        uint64_t seq,
+        const char* profilingTitle,
+        const std::optional<std::vector<at::Tensor>>& inputs,
+        bool desyncDebug,
+        bool enableTiming,
+        bool cudaEventCacheEnabled,
+        DebugLevel distDebugLevel)
+        : WorkCCL(pgUID, pgDesc, device, rank, opType, seq, profilingTitle, inputs, desyncDebug, enableTiming, cudaEventCacheEnabled, distDebugLevel) {};
 
 ProcessGroupXCCL::WorkXCCL::~WorkXCCL() = default;
-
-bool ProcessGroupXCCL::WorkXCCL::isCompleted() {
-  if (xcclEndEvent_ && xcclEndEvent_->query()) {
-    return true;
-  }
-  return false;
-}
-
-void ProcessGroupXCCL::WorkXCCL::synchronize() {
-  synchronizeInternal(kNoTimeout);
-}
-
-void ProcessGroupXCCL::WorkXCCL::synchronizeInternal(
-    std::chrono::milliseconds timeout) {
-  auto currentStream = at::xpu::getCurrentXPUStream(device_.index());
-  xcclEndEvent_->block(currentStream);
-  if (blockingWait_) {
-    while (!isCompleted()) {
-      auto currentTimepoint = std::chrono::steady_clock::now();
-      auto timeElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-          currentTimepoint - workStartTime_);
-      if (timeElapsed >= timeout) {
-        std::string exceptionMsg = c10::str(
-            "Work ran time out after ", timeElapsed.count(), " milliseconds.");
-        TORCH_CHECK(false, exceptionMsg)
-      }
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(kSynchronizeBusyWaitMillis));
-    }
-  }
-  if (barrierTensor_.defined()) {
-    auto currentStream = at::xpu::getCurrentXPUStream(device_.index());
-    currentStream.synchronize();
-  }
-}
-
-bool ProcessGroupXCCL::WorkXCCL::wait(std::chrono::milliseconds timeout) {
-  synchronizeInternal(timeout);
-  return true;
-}
 
 constexpr const char* MULTI_DEVICE_ERROR_MSG =
     "Expecting one tensor only but got multiple";
