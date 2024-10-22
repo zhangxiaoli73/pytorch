@@ -99,6 +99,7 @@ void check_xpu_single_tensor(
     }
   }
 }
+
 int64_t check_xpu_tensors_same_device(const std::vector<at::Tensor>& tensors) {
   TORCH_CHECK_WITH(
       ValueError, tensors.size() == 0, "Tensor list must be nonempty");
@@ -317,6 +318,20 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   auto comms = ccl::create_communicators(numRanks, devs_rank, ctx, xccl_kvs);
   XCCLComm = std::make_shared<xcclComm_t>(std::move(comms[0]));
 
+  RECORD_PARAM_COMMS(
+      0, // seq
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      rank, // rank
+      "init", // collective name
+      0, // inNelems
+      0, // outNelems
+      at::kByte, // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      size_); // worldSize
+
   std::lock_guard<std::mutex> lock(mutex_);
   devXCCLCommMap_.emplace(deviceKey, XCCLComm);
   xcclStreamsMap_.emplace(deviceKey, std::move(stream));
@@ -530,6 +545,23 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::send(
   auto tensor = tensors.back();
   check_xpu_single_tensor(tensor, true);
 
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      tensors, // inputTensors
+      tensors, // outputTensors
+      dstRank, // dst rank
+      "send", // collective name
+      tensor.numel(), // inNelems
+      tensor.numel(), // outNelems
+      tensor.scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
+
   auto ret = pointToPoint(
       tensor,
       [&](at::Tensor& input,
@@ -560,6 +592,23 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::recv(
   // @lint-ignore CLANGTIDY
   auto tensor = tensors.back();
   check_xpu_single_tensor(tensor, true);
+
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      tensors, // inputTensors
+      tensors, // outputTensors
+      srcRank, // src rank
+      "recv", // collective name
+      tensor.numel(), // inNelems
+      tensor.numel(), // outNelems
+      tensor.scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
 
   auto ret = pointToPoint(
       tensor,
@@ -627,6 +676,23 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::gather(
     // `collective` template function requires it to invoke its function
     outputs.emplace_back();
   }
+
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      inputTensors, // inputTensors
+      outputTensors, // outputTensors
+      opts.rootRank, // root rank
+      "gather", // collective name
+      inputTensor.numel(), // inNelems
+      inputTensor.numel() * this->getSize(), // outNelems
+      inputTensor.scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSize
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
 
   auto inputs = std::vector<at::Tensor>{inputTensor};
   return collective(
@@ -722,6 +788,23 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::scatter(
     inputs.emplace_back();
   }
 
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      inputTensors, // inputTensors
+      outputTensors, // outputTensors
+      opts.rootRank, // root rank
+      "scatter", // collective name
+      outputTensor.numel() * this->getSize(), // inNelems
+      outputTensor.numel(), // outNelems
+      outputTensor.scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSize
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
+
   const auto root = opts.rootRank;
 
   auto outputs = std::vector<at::Tensor>{outputTensor};
@@ -810,6 +893,24 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
   auto tensor = tensors.back();
   check_xpu_single_tensor(tensor);
 
+  // @lint-ignore CLANGTIDY
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      tensors, // inputTensors
+      tensors, // outputTensors
+      rank_, // rank
+      "allreduce", // collective name
+      tensor.numel(), // inNelems
+      tensor.numel(), // outNelems
+      tensor.scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      size_); // worldSize
+
   return collective(
       tensor,
       tensor,
@@ -836,7 +937,26 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
 c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce_coalesced(
     std::vector<at::Tensor>& tensors,
     const AllreduceCoalescedOptions& opts) {
-  check_xpu_tensors_same_device(tensors);
+  auto total_numel = check_xpu_tensors_same_device(tensors);
+
+  // @lint-ignore CLANGTIDY
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      tensors, // inputTensors
+      tensors, // outputTensors
+      rank_, // rank
+      "allreduce_coalesced", // collective name
+      total_numel, // inNelems
+      total_numel, // outNelems
+      tensors[0].scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
+
   return collectiveCoalesced(
       tensors,
       tensors,
@@ -866,6 +986,24 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::broadcast(
   TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
   auto tensor = tensors.back();
   check_xpu_single_tensor(tensor);
+
+  // @lint-ignore CLANGTIDY
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      tensors, // inputTensors
+      tensors, // outputTensors
+      opts.rootRank, // root rank
+      "broadcast", // collective name
+      tensor.numel(), // inNelems
+      tensor.numel(), // outNelems
+      tensor.scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
 
   const auto root = opts.rootRank + opts.rootTensor;
 
@@ -927,6 +1065,23 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::reduce(
   TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
   auto tensor = tensors.back();
   check_xpu_single_tensor(tensor);
+
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      tensors, // inputTensors
+      tensors, // outputTensors
+      opts.rootRank, // root rank
+      "reduce", // collective name
+      tensor.numel(), // inNelems
+      tensor.numel(), // outNelems
+      tensor.scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
 
   return collective(
       tensor,
@@ -997,6 +1152,24 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::allgather(
   // @lint-ignore CLANGTIDY
   std::vector<at::Tensor>& outputTensors_ = outputTensors.back();
 
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      inputTensors, // inputTensors
+      outputTensors, // outputTensors
+      rank_, // rank
+      "all_gather", // collective name
+      inputTensor.numel(), // inNelems
+      inputTensor.numel() * // outNelems
+          this->getSize(),
+      inputTensor.scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSize
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
+
   bool same_size = check_same_size(outputTensors_);
   if (same_size) {
     // Flatten a vector of tensors into a single, stacked tensor.
@@ -1066,6 +1239,23 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_allgather_base(
       input_tensor.numel() * size_ == output_tensor.numel(),
       "output tensor size must be equal to world_size times input tensor size");
 
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      input_tensor, // inputTensors
+      output_tensor, // outputTensors
+      rank_, // rank
+      "_allgather_base", // collective name
+      input_tensor.numel(), // inNelems
+      output_tensor.numel(), // outNelems
+      output_tensor.scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSize
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
+
   return collective(
       input_tensor,
       output_tensor,
@@ -1124,6 +1314,23 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::reduce_scatter(
   check_xpu_single_tensor(outputTensor);
   // @lint-ignore CLANGTIDY
   auto inputTensors_ = inputTensors.back();
+
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      inputTensors, // inputTensors
+      outputTensors, // outputTensors
+      rank_, // rank
+      "reduce_scatter", // collective name
+      outputTensor.numel() * this->getSize(), // inNelems
+      outputTensor.numel(), // outNelems
+      outputTensor.scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
 
   bool same_size = check_same_size(inputTensors_);
   if (same_size) {
@@ -1195,6 +1402,23 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_reduce_scatter_base(
       inputTensor.numel() == outputTensor.numel() * size_,
       "input tensor must be the same size as output size times world size");
 
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      inputTensor, // inputTensor
+      outputTensor, // outputTensor
+      rank_, // rank
+      "_reduce_scatter_base", // collective name
+      inputTensor.numel(), // inNelems
+      outputTensor.numel(), // outNelems
+      outputTensor.scalar_type(), // dtype
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
+
   return collective(
       inputTensor,
       outputTensor,
@@ -1250,6 +1474,20 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::reduce_scatter_tensor_coalesced(
 }
 
 c10::intrusive_ptr<Work> ProcessGroupXCCL::barrier(const BarrierOptions& opts) {
+  RECORD_PARAM_COMMS(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      rank_, // rank
+      "barrier", // collective name
+      0, // inNelems
+      0, // outNelems
+      at::kByte, // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
   // Device to use for barrier
   int barDevIdx = -1;
 
@@ -1292,6 +1530,23 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall_base(
   check_xpu_single_tensor(outputTensor, true);
   check_xpu_single_tensor(inputTensor, true);
   if (outputSplitSizes.size() == 0 && inputSplitSizes.size() == 0) {
+    RECORD_PARAM_COMMS_DATA(
+        static_cast<int>(
+            this->getSequenceNumberForGroup() +
+            1), // seq + 1 to match collective
+        std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+        inputTensor, // inputTensor
+        outputTensor, // outputTensor
+        rank_, // rank
+        "all_to_all", // collective name
+        inputTensor.numel(), // inNelems
+        outputTensor.numel(), // outNelems
+        inputTensor.scalar_type(), // dType
+        std::vector<int64_t>(), // inSplitSizes
+        std::vector<int64_t>(), // outSplitSizes
+        -1, // globalRankStart
+        -1, // globalRankStride
+        this->getSize()); // worldSize
     TORCH_CHECK(
         outputTensor.numel() == inputTensor.numel() &&
             outputTensor.scalar_type() == inputTensor.scalar_type(),
@@ -1323,6 +1578,24 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall_base(
   } else {
     c10d::checkSplitSizes(inputSplitSizes, inputTensor, size_);
     c10d::checkSplitSizes(outputSplitSizes, outputTensor, size_);
+
+    RECORD_PARAM_COMMS_DATA(
+        static_cast<int>(
+            this->getSequenceNumberForGroup() +
+            1), // seq + 1 to match collective
+        std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+        inputTensor, // inputTensor
+        outputTensor, // outputTensor
+        rank_, // rank
+        "all_to_allv", // collective name
+        inputTensor.numel(), // inNelems
+        outputTensor.numel(), // outNelems
+        inputTensor.scalar_type(), // dType
+        inputSplitSizes, // inSplitSizes
+        outputSplitSizes, // outSplitSizes
+        -1, // globalRankStart
+        -1, // globalRankStride
+        this->getSize()); // worldSize
 
     return collective(
         inputTensor,
@@ -1370,6 +1643,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall(
     std::vector<at::Tensor>& inputTensors,
     const AllToAllOptions& /* unused */) {
   auto device = outputTensors[0].device();
+  int64_t total_numel = 0;
   for (const auto r : c10::irange(outputTensors.size())) {
     check_xpu_single_tensor(outputTensors[r], true);
     check_xpu_single_tensor(inputTensors[r], true);
@@ -1377,7 +1651,25 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::alltoall(
         device == outputTensors[r].device() &&
             device == inputTensors[r].device(),
         "Tensors must be on the same device")
+    total_numel += inputTensors[r].numel();
   }
+
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      inputTensors, // inputTensors
+      outputTensors, // outputTensors
+      rank_, // rank
+      "all_to_all", // collective name
+      total_numel, // inNelems
+      total_numel, // outNelems
+      inputTensors.front().scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
 
   return collective(
       inputTensors,
