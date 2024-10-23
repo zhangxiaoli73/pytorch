@@ -31,7 +31,7 @@ using xcclComm_t = ccl::communicator;
 using XCCL_KVS = ccl::shared_ptr_class<ccl::kvs>;
 constexpr const char* XCCL_BACKEND_NAME = "xccl";
 
-class TORCH_API ProcessGroupXCCL : public Backend {
+class TORCH_API ProcessGroupXCCL : public ProcessGroupCCL {
  public:
   class WorkXCCL : public WorkCCL {
    public:
@@ -48,7 +48,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
         bool enableTiming = false,
         bool cudaEventCacheEnabled = false,
         DebugLevel distDebugLevel = DebugLevel::Off);
-    ~WorkXCCL() override;
+    ~WorkXCCL();
 
    private:
     friend class ProcessGroupXCCL;

@@ -799,7 +799,7 @@ ProcessGroupNCCL::ProcessGroupNCCL(
     int rank,
     int size,
     c10::intrusive_ptr<Options> options)
-    : Backend(rank, size),
+    : ProcessGroupCCL(rank, size),
       store_(store),
       options_(options),
       ncclCommCounter_(0),

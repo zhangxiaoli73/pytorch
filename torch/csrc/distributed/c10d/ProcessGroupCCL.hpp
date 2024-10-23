@@ -30,6 +30,17 @@ namespace c10d {
 
 typedef void* cclComm_t;
 
+enum ErrorHandlingMode {
+  NoHandling = 0,
+  TearDown = 1,
+  CleanUpOnly = 2,
+  SkipCleanUp = 3
+};
+
+#define SHOULD_CLEAN_UP(a) (a != NoHandling && a != SkipCleanUp)
+
+#define SHOULD_TEAR_DOWN(a) (a != NoHandling && a != CleanUpOnly)
+
 class TORCH_API ProcessGroupCCL : public Backend {
  public:
   class WorkCCL : public Work, public std::enable_shared_from_this<WorkCCL> {
@@ -107,7 +118,8 @@ class TORCH_API ProcessGroupCCL : public Backend {
 
     std::vector<at::Tensor> result() override;
 
-   protected:
+     // todo: zl_debug protected or public?
+//   protected:
     // The process group unique id
     std::string pgUID_;
 
@@ -169,7 +181,6 @@ class TORCH_API ProcessGroupCCL : public Backend {
         std::ostream& output,
         const WorkCCL& workCCL);
 
-   private:
     // Helper function for synchronize
     void synchronizeInternal(std::chrono::milliseconds timeout);
 
@@ -230,11 +241,13 @@ class TORCH_API ProcessGroupCCL : public Backend {
         eventsArray_[2]; // 0 for timing=false, 1 for timing=true
   };
 
+   // todo: zl_debug how to avoid such static?
+   static bool cclCommIsAborted;
+   static void cclCommAbort(std::shared_ptr<cclComm_t> cclComm_);
+   static std::exception_ptr checkForCCLErrorsInternal(std::shared_ptr<cclComm_t> cclComm_);
 
-   bool cclCommIsAborted;
-   void cclCommAbort(std::shared_ptr<cclComm_t> cclComm_);
-   void checkForCCLErrorsInternal(std::shared_ptr<cclComm_t> cclComm_);
-
+   ProcessGroupCCL(int rank, int size);
+   ~ProcessGroupCCL() override;
 };
 
 } // namespace c10d

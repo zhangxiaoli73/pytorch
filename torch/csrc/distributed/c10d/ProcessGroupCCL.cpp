@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include <c10/core/DeviceType.h>>
+#include <c10/core/DeviceType.h>
 #include <c10/util/CallOnce.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
@@ -29,6 +29,20 @@
 
 namespace c10d {
 
+namespace {
+    // Returns exception's what() given an exception_ptr instance.
+    std::string getExceptionMsgFromExceptionPtr(
+        const std::exception_ptr& exceptionPtr) {
+      TORCH_CHECK(exceptionPtr != nullptr);
+      try {
+        std::rethrow_exception(exceptionPtr);
+      } catch (const std::exception& e) {
+        return e.what();
+      } catch (...) {
+        return "Unknown exception type";
+      }
+    }
+}
 constexpr int64_t kSynchronizeBusyWaitMillis = 10;
 
 std::ostream& operator<<(
@@ -82,11 +96,15 @@ ProcessGroupCCL::WorkCCL::WorkCCL(
     cclEndEvent_ =
         ProcessGroupCCL::AccEventCache::get().create(enableTiming);
   } else {
-    cclStartEvent_ = enableTiming
-        ? std::make_shared<c10::Event>(cudaEventDefault)
-        : nullptr;
-    cclEndEvent_ = std::make_shared<c10::Event>(
-        enableTiming ? cudaEventDefault : cudaEventDisableTiming);
+  // todo: zl_debug what's the cudaEventDefault?
+//    cclStartEvent_ = enableTiming
+//        ? std::make_shared<c10::Event>(cudaEventDefault)
+//        : nullptr;
+//    cclEndEvent_ = std::make_shared<c10::Event>(
+//        enableTiming ? cudaEventDefault : cudaEventDisableTiming);
+
+    cclStartEvent_ =  nullptr;
+    cclEndEvent_ = std::shared_ptr<c10::Event>(new c10::Event(device.type()));
   }
 }
 
@@ -117,14 +135,14 @@ ProcessGroupCCL::WorkCCL::WorkCCL(const WorkCCL& w)
 ProcessGroupCCL::WorkCCL::~WorkCCL() = default;
 
 bool ProcessGroupCCL::WorkCCL::isCompleted() {
-  if (!this->cclCommIsAborted) {
+  if (!cclCommIsAborted) {
     checkAndSetException();
   }
   return exception() || finishedGPUExecutionInternal();
 }
 
 bool ProcessGroupCCL::WorkCCL::isStarted() {
-  if (!this->cclCommIsAborted) {
+  if (!cclCommIsAborted) {
     checkAndSetException();
   }
   return exception() || startedGPUExecutionInternal();
@@ -140,7 +158,7 @@ void ProcessGroupCCL::WorkCCL::checkAndSetException() {
     return;
   }
 
-  auto exception_ptr = checkForcclErrors();
+  auto exception_ptr = checkForCCLErrors();
   std::unique_lock<std::mutex> lock(mutex_);
   exception_ = exception_ptr;
   if (exception_) {
@@ -251,7 +269,11 @@ void ProcessGroupCCL::WorkCCL::synchronize() {
 }
 
 void ProcessGroupCCL::WorkCCL::synchronizeStream() {
-  auto currentStream = at::cuda::getCurrentStream(device_.index());
+  // todo: zl_debug change to more generic
+  // auto currentStream = at::xpu::getCurrentXPUStream(device_.index());
+  c10::impl::VirtualGuardImpl impl(device_.type());
+  c10::Stream currentStream = impl.getStream(device_);
+
   // Block the current stream on the ccl stream
   cclEndEvent_->block(currentStream);
 
@@ -320,7 +342,7 @@ bool ProcessGroupCCL::WorkCCL::wait(std::chrono::milliseconds timeout) {
 
 void ProcessGroupCCL::WorkCCL::abort() {
   // Abort all communicators of this work
-  this->cclCommAbort(cclComm_);
+  cclCommAbort(cclComm_);
 }
 
 
@@ -333,11 +355,7 @@ constexpr const char* MULTI_DEVICE_ERROR_MSG =
     "https://pytorch.org/docs/stable/distributed.html#multi-gpu-collective-functions. "
     "ProcessGroupCCL continues supporting multi-process and multi-thread modes.";
 
-ProcessGroupCCL::~ProcessGroupCCL() {
-  LOG(INFO) << logPrefix() << "ProcessGroupCCL destructor entered.";
-}
-
-std::exception_ptr ProcessGroupCCL::WorkCCL::checkForcclErrors() {
+std::exception_ptr ProcessGroupCCL::WorkCCL::checkForCCLErrors() {
   return checkForCCLErrorsInternal(cclComm_);
 }
 
@@ -354,11 +372,23 @@ float ProcessGroupCCL::WorkCCL::getDuration() const {
   TORCH_CHECK(
       cclEndEvent_,
       "getDuration only works if cclEndEvents_ is populated, which should always be true");
-  return cclStartEvent_->elapsed_time(*cclEndEvent_);
+  // todo: zl_debug how to use it?
+  //return cclStartEvent_->elapsed_time(*cclEndEvent_);
+  return 0.0f;
 }
 
 uint64_t ProcessGroupCCL::WorkCCL::getSequencenumber() const {
   return seq_;
+}
+
+ProcessGroupCCL::ProcessGroupCCL(
+    int rank,
+    int size)
+    : Backend(rank, size){}
+
+ProcessGroupCCL::~ProcessGroupCCL() {
+//  LOG(INFO) << logPrefix() << "ProcessGroupCCL destructor entered.";
+  LOG(INFO) << "ProcessGroupCCL destructor entered.";
 }
 
 } // namespace c10d

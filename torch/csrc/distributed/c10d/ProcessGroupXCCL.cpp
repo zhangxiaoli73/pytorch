@@ -192,7 +192,7 @@ ProcessGroupXCCL::ProcessGroupXCCL(
     const c10::intrusive_ptr<Store>& store,
     int rank,
     int size)
-    : Backend(rank, size), store_(store) {
+    : ProcessGroupCCL(rank, size), store_(store) {
   blockingWait_ = getCvarBool(TORCH_XCCL_BLOCKING_WAIT, false);
   init();
 }
@@ -207,12 +207,15 @@ c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> ProcessGroupXCCL::initWork(
     const std::vector<at::Tensor>& inputs,
     const std::vector<at::Tensor>& outputs) {
   auto r = c10::make_intrusive<ProcessGroupXCCL::WorkXCCL>(
+      pg_uid_,
+      pg_desc_,
       device,
       rank,
       opType,
       seqCollective_,
       profilingTitle,
-      std::optional<std::vector<at::Tensor>>(inputs));
+      std::optional<std::vector<at::Tensor>>(inputs),
+      false, false, false, DebugLevel::Off);
   return r;
 }
 
@@ -334,7 +337,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::endCoalescing(OpType optype) {
 
   groupEnd();
 
-  work->xcclEndEvent_->record(stream);
+  work->cclEndEvent_->record(stream);
 
   coalescing_state_ = 0;
   coalescedComm_ = nullptr;
@@ -395,7 +398,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
   post(stream, work);
 
   if (!coalescing_state_) {
-    work->xcclEndEvent_->record(stream);
+    work->cclEndEvent_->record(stream);
   }
 
   std::vector<c10::Stream> streams = {stream.unwrap()};
@@ -468,7 +471,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::pointToPoint(
 
     fn(tensor, *comm, stream, p2pTargetRank);
 
-    work->xcclEndEvent_->record(stream);
+    work->cclEndEvent_->record(stream);
     work->blockingWait_ = blockingWait_;
     std::vector<c10::Stream> streams = {stream.unwrap()};
     c10::MultiStreamGuard streamGuard(streams);
