@@ -42,6 +42,16 @@ namespace {
         return "Unknown exception type";
       }
     }
+
+    void syncStream(
+        at::Device& device,
+        c10::Event& cclEvent,
+        c10::Stream& cclStream) {
+      c10::impl::VirtualGuardImpl impl(device.type());
+      c10::Stream currentStream = impl.getStream(device);
+      cclEvent.record(currentStream);
+      cclEvent.block(cclStream);
+    }
 }
 constexpr int64_t kSynchronizeBusyWaitMillis = 10;
 
@@ -397,6 +407,103 @@ ProcessGroupCCL::~ProcessGroupCCL() {
 //  LOG(INFO) << logPrefix() << "ProcessGroupCCL destructor entered.";
   LOG(INFO) << "ProcessGroupCCL destructor entered.";
 }
+
+c10::Stream ProcessGroupCCL::getCCLStream(const std::string& deviceKey,
+    at::Device& device) {
+     // todo: zl_debug to be check why it cannot work
+//  {
+//    std::lock_guard<std::mutex> lock(mutex_);
+//    if (cclStreamsMap_.find(deviceKey) != cclStreamsMap_.end()) {
+//      return cclStreamsMap_[deviceKey];
+//    }
+//  }
+    c10::impl::VirtualGuardImpl impl(device.type());
+    c10::Stream stream =
+      impl.getStreamFromGlobalPool(device, /*isHighPriority=*/false);
+
+    cclStreamsMap_.emplace(deviceKey, stream);
+    cclEventsMap_.emplace(deviceKey, new c10::Event(device.type()));
+    return stream;
+}
+
+c10::intrusive_ptr<ProcessGroupCCL::WorkCCL> ProcessGroupCCL::initCCLWork(
+    at::Device& device,
+    int rank,
+    OpType opType,
+    const char* profilingTitle,
+    const std::vector<at::Tensor>& inputs,
+    const std::vector<at::Tensor>& outputs) {
+  auto r = c10::make_intrusive<ProcessGroupCCL::WorkCCL>(
+      pg_uid_,
+      pg_desc_,
+      device,
+      rank,
+      opType,
+      seqCollective_,
+      profilingTitle,
+      std::optional<std::vector<at::Tensor>>(inputs),
+      false, false, false, DebugLevel::Off);
+  return r;
+}
+
+c10::intrusive_ptr<Work> ProcessGroupCCL::allreduce(
+  std::vector<at::Tensor>& tensors,
+  const AllreduceOptions& opts = AllreduceOptions()) {
+      TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
+      auto tensor = tensors.back();
+      //todo:  move to backend specific
+//      check_xpu_single_tensor(tensor);
+
+      // @lint-ignore CLANGTIDY
+      RECORD_PARAM_COMMS_DATA(
+          static_cast<int>(
+              this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+          std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+          tensors, // inputTensors
+          tensors, // outputTensors
+          rank_, // rank
+          "allreduce", // collective name
+          tensor.numel(), // inNelems
+          tensor.numel(), // outNelems
+          tensor.scalar_type(), // dType
+          std::vector<int64_t>(), // inSplitSizes
+          std::vector<int64_t>(), // outSplitSizes
+          -1, // globalRankStart
+          -1, // globalRankStride
+          size_); // worldSize
+
+      auto device = tensor.device();
+      const auto key = std::to_string(device.index());
+      auto stream = getCCLStream(key, device);
+      syncStream(device, cclEventsMap_[key], stream);
+
+      c10::intrusive_ptr<ProcessGroupCCL::WorkCCL> work;
+      work = initCCLWork(device, rank_, OpType::ALLREDUCE);
+
+      work->outputs_ = std::make_shared<std::vector<at::Tensor>>(tensor);
+
+      // todo: zl_debug why do we need gpuGuard here?
+//      at::xpu::OptionalXPUGuard gpuGuard(device);
+//      for (const auto i : c10::irange(inputs.size())) {
+//        c10::xpu::XPUCachingAllocator::recordStream(
+//            tensor.storage().data_ptr(), stream);
+//        allreduce_impl(tensor, tensor, device, stream, OpType::ALLREDUCE);
+//      }
+
+      allreduce_impl(tensor, tensor, device, stream, OpType::ALLREDUCE);
+      work->cclEndEvent_->record(stream);
+
+      std::vector<c10::Stream> streams = {stream.unwrap()};
+      c10::MultiStreamGuard streamGuard(streams);
+      std::vector<at::Device> devices{device};
+      work->future_ = c10::make_intrusive<at::ivalue::Future>(
+          c10::ListType::create(c10::TensorType::get()), devices);
+      work->future_->markCompleted(at::IValue(*work->outputs_));
+      //todo: zl_debug add it back
+      work->blockingWait_ = false; //blockingWait_;
+
+      return work;
+  }
 
 } // namespace c10d
 
