@@ -116,7 +116,7 @@ class TORCH_API ProcessGroupCCL : public Backend {
     bool checkTimeout(
         std::optional<std::chrono::milliseconds> timeout = std::nullopt);
 
-    std::vector<at::Tensor> result() override;
+//    std::vector<at::Tensor> result() override;
 
      // todo: zl_debug protected or public?
 //   protected:
@@ -226,20 +226,20 @@ class TORCH_API ProcessGroupCCL : public Backend {
     friend class ProcessGroupCCL;
   };
 
-  class AccEventCache {
-   public:
-    AccEventCache();
-    std::shared_ptr<c10::Event> create(bool timing);
-    static AccEventCache& get();
-
-   private:
-    std::mutex cacheMutex_;
-    // NOTE: We intentionaly store raw pointers so that
-    // we do not attempt to destroy the event objects on process exit,
-    // because cuda may be gone.
-    std::vector<c10::Event*>
-        eventsArray_[2]; // 0 for timing=false, 1 for timing=true
-  };
+//  class AccEventCache {
+//   public:
+//    AccEventCache();
+//    std::shared_ptr<c10::Event> create(bool timing);
+//    static AccEventCache& get();
+//
+//   private:
+//    std::mutex cacheMutex_;
+//    // NOTE: We intentionaly store raw pointers so that
+//    // we do not attempt to destroy the event objects on process exit,
+//    // because cuda may be gone.
+//    std::vector<c10::Event*>
+//        eventsArray_[2]; // 0 for timing=false, 1 for timing=true
+//  };
 
    // todo: zl_debug how to avoid such static?
    static bool cclCommIsAborted;

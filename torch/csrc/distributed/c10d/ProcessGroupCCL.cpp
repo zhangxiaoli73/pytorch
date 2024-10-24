@@ -89,23 +89,22 @@ ProcessGroupCCL::WorkCCL::WorkCCL(
   // Creates the CUDA event wrappers
   // Note: The actual events are lazily created when first recorded to with
   // DEFAULT_FLAGS = cudaEventDisableTiming.
-  if (cudaEventCacheEnabled) {
-    cclStartEvent_ = enableTiming
-        ? ProcessGroupCCL::AccEventCache::get().create(enableTiming)
-        : nullptr;
-    cclEndEvent_ =
-        ProcessGroupCCL::AccEventCache::get().create(enableTiming);
-  } else {
-  // todo: zl_debug what's the cudaEventDefault?
+//  if (cudaEventCacheEnabled) {
+//    cclStartEvent_ = enableTiming
+//        ? ProcessGroupCCL::AccEventCache::get().create(enableTiming)
+//        : nullptr;
+//    cclEndEvent_ =
+//        ProcessGroupCCL::AccEventCache::get().create(enableTiming);
+//  } else {
+//  // todo: zl_debug what's the cudaEventDefault?
 //    cclStartEvent_ = enableTiming
 //        ? std::make_shared<c10::Event>(cudaEventDefault)
 //        : nullptr;
 //    cclEndEvent_ = std::make_shared<c10::Event>(
 //        enableTiming ? cudaEventDefault : cudaEventDisableTiming);
-
-    cclStartEvent_ =  nullptr;
-    cclEndEvent_ = std::shared_ptr<c10::Event>(new c10::Event(device.type()));
-  }
+//  }
+  cclStartEvent_ =  nullptr;
+  cclEndEvent_ = std::shared_ptr<c10::Event>(new c10::Event(device.type()));
 }
 
 ProcessGroupCCL::WorkCCL::WorkCCL(const WorkCCL& w)
@@ -379,6 +378,14 @@ float ProcessGroupCCL::WorkCCL::getDuration() const {
 
 uint64_t ProcessGroupCCL::WorkCCL::getSequencenumber() const {
   return seq_;
+}
+
+void ProcessGroupCCL::cclCommAbort(std::shared_ptr<cclComm_t> cclComm_) {
+    cclCommIsAborted = true;
+    return;
+}
+std::exception_ptr ProcessGroupCCL::checkForCCLErrorsInternal(std::shared_ptr<cclComm_t> cclComm_) {
+    return nullptr;
 }
 
 ProcessGroupCCL::ProcessGroupCCL(
