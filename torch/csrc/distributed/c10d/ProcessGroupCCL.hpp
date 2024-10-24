@@ -250,6 +250,112 @@ class TORCH_API ProcessGroupCCL : public Backend {
 
    ProcessGroupCCL(int rank, int size);
    ~ProcessGroupCCL() override;
+
+  c10::intrusive_ptr<Work> allreduce(
+      std::vector<at::Tensor>& tensors,
+      const AllreduceOptions& opts = AllreduceOptions()) override;
+
+  c10::intrusive_ptr<Work> allreduce_coalesced(
+      std::vector<at::Tensor>& tensors,
+      const AllreduceCoalescedOptions& opts =
+          AllreduceCoalescedOptions()) override;
+
+  c10::intrusive_ptr<Work> reduce(
+      std::vector<at::Tensor>& tensors,
+      const ReduceOptions& opts = ReduceOptions()) override;
+
+  c10::intrusive_ptr<Work> broadcast(
+      std::vector<at::Tensor>& tensors,
+      const BroadcastOptions& opts = BroadcastOptions()) override;
+
+  c10::intrusive_ptr<Work> allgather(
+      std::vector<std::vector<at::Tensor>>& outputTensors,
+      std::vector<at::Tensor>& inputTensors,
+      const AllgatherOptions& opts = AllgatherOptions()) override;
+
+  c10::intrusive_ptr<Work> _allgather_base(
+      at::Tensor& outputbuffer,
+      at::Tensor& inputbuffer,
+      const AllgatherOptions& opts = AllgatherOptions()) override;
+
+  c10::intrusive_ptr<Work> allgather_into_tensor_coalesced(
+      std::vector<at::Tensor>& outputs,
+      std::vector<at::Tensor>& inputs,
+      const AllgatherOptions& opts = AllgatherOptions()) override;
+
+  c10::intrusive_ptr<Work> reduce_scatter(
+      std::vector<at::Tensor>& outputTensors,
+      std::vector<std::vector<at::Tensor>>& inputTensors,
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
+
+  c10::intrusive_ptr<Work> _reduce_scatter_base(
+      at::Tensor& outputTensor,
+      at::Tensor& inputTensor,
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
+
+  c10::intrusive_ptr<Work> reduce_scatter_tensor_coalesced(
+      std::vector<at::Tensor>& outputs,
+      std::vector<at::Tensor>& inputs,
+      const ReduceScatterOptions& opts = ReduceScatterOptions()) override;
+
+  c10::intrusive_ptr<Work> barrier(
+      const BarrierOptions& opts = BarrierOptions()) override;
+
+  c10::intrusive_ptr<Work> alltoall_base(
+      at::Tensor& outputTensor,
+      at::Tensor& inputTensor,
+      std::vector<int64_t>& outputSplitSizes,
+      std::vector<int64_t>& inputSplitSizes,
+      const AllToAllOptions& opts = AllToAllOptions()) override;
+
+  c10::intrusive_ptr<Work> alltoall(
+      std::vector<at::Tensor>& outputTensors,
+      std::vector<at::Tensor>& inputTensors,
+      const AllToAllOptions& opts = AllToAllOptions()) override;
+
+  c10::intrusive_ptr<Work> send(
+      std::vector<at::Tensor>& tensors,
+      int dstRank,
+      int tag) override;
+
+  c10::intrusive_ptr<Work> recv(
+      std::vector<at::Tensor>& tensors,
+      int srcRank,
+      int tag) override;
+
+  c10::intrusive_ptr<Work> gather(
+      std::vector<std::vector<at::Tensor>>& outputTensors,
+      std::vector<at::Tensor>& inputTensors,
+      const GatherOptions& opts = GatherOptions()) override;
+
+  c10::intrusive_ptr<Work> scatter(
+      std::vector<at::Tensor>& outputTensors,
+      std::vector<std::vector<at::Tensor>>& inputTensors,
+      const ScatterOptions& opts = ScatterOptions()) override;
+
+  uint64_t getSequenceNumberForGroup() override {
+     return seqCollective_;
+   }
+
+  c10::Stream getCCLStream(const std::string& deviceKey,at::Device& device);
+  virtual void allreduce_impl(at::Tensor& input, at::Tensor& output,
+      const AllreduceOptions& opts, c10::Stream stream, OpType opType);
+
+  virtual c10::intrusive_ptr<ProcessGroupCCL::WorkCCL> initCCLWork(
+      at::Device& device,
+      int rank,
+      OpType opType,
+      const char* profilingTitle = nullptr,
+      const std::vector<at::Tensor>& inputs = {},
+      const std::vector<at::Tensor>& outputs = {});
+
+  protected:
+      uint64_t seqCollective_{0};
+      std::unordered_map<std::string, c10::Stream> cclStreamsMap_;
+      std::unordered_map<std::string, c10::Event> cclEventsMap_;
+
+      // Mutex to guard maps like devNCCLCommMap_.
+      std::mutex mutex_;
 };
 
 } // namespace c10d
