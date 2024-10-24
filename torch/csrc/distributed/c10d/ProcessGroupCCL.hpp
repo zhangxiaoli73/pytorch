@@ -173,6 +173,8 @@ class TORCH_API ProcessGroupCCL : public Backend {
     size_t numelIn_ = -1;
     size_t numelOut_ = -1;
 
+    bool cclCommIsAborted = false;
+
     // Wrapper method for the static checkForCCLErrors which can be overridden
     // for tests.
     virtual std::exception_ptr checkForCCLErrors();
@@ -242,7 +244,7 @@ class TORCH_API ProcessGroupCCL : public Backend {
 //  };
 
    // todo: zl_debug how to avoid such static?
-   static bool cclCommIsAborted;
+//   static bool cclCommIsAborted;
    static void cclCommAbort(std::shared_ptr<cclComm_t> cclComm_);
    static std::exception_ptr checkForCCLErrorsInternal(std::shared_ptr<cclComm_t> cclComm_);
 

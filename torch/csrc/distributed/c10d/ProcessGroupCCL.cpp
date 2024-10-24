@@ -381,7 +381,7 @@ uint64_t ProcessGroupCCL::WorkCCL::getSequencenumber() const {
 }
 
 void ProcessGroupCCL::cclCommAbort(std::shared_ptr<cclComm_t> cclComm_) {
-    cclCommIsAborted = true;
+//    cclCommIsAborted = true;
     return;
 }
 std::exception_ptr ProcessGroupCCL::checkForCCLErrorsInternal(std::shared_ptr<cclComm_t> cclComm_) {

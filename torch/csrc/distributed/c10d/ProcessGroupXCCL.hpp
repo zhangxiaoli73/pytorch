@@ -283,6 +283,10 @@ class TORCH_API ProcessGroupXCCL : public ProcessGroupCCL {
       std::vector<std::vector<at::Tensor>>& inputTensors,
       const ScatterOptions& opts = ScatterOptions()) override;
 
+  uint64_t getSequenceNumberForGroup() override {
+     return seqCollective_;
+   }
+
  protected:
   std::unordered_map<std::string, at::xpu::XPUStream> xcclStreamsMap_;
   std::unordered_map<std::string, at::xpu::XPUEvent> xcclEventsMap_;
