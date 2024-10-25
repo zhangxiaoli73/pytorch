@@ -246,6 +246,12 @@ ProcessGroupXCCL::ProcessGroupXCCL(
 
 ProcessGroupXCCL::~ProcessGroupXCCL() = default;
 
+void ProcessGroupXCCL::setSequenceNumberForGroup() {}
+
+uint64_t ProcessGroupXCCL::getSequenceNumberForGroup() {
+  return seqCollective_;
+}
+
 c10::intrusive_ptr<ProcessGroupXCCL::WorkXCCL> ProcessGroupXCCL::initWork(
     at::Device& device,
     int rank,
@@ -353,6 +359,11 @@ void ProcessGroupXCCL::groupEnd() {
 // TODO: wait p2p enable
 static constexpr int CoalActive = 0x01, CoalColl = 0x02, CoalP2P = 0x04;
 void ProcessGroupXCCL::startCoalescing() {
+  if (coalescing_state_ & CoalP2P) {
+    seqP2P_++;
+  } else {
+    seqCollective_++;
+  }
   coalescedDevice_.set_index(-1);
   coalescedComm_ = nullptr;
   coalescing_state_ |= CoalActive;
@@ -402,6 +413,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::collective(
     PostProcess post,
     OpType opType,
     const char* profilingTitle) {
+  seqCollective_++;
   auto device = inputs[0].device();
   const auto key = std::to_string(device.index());
   auto comm = getXCCLComm(key, device, opType);
@@ -480,6 +492,9 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::pointToPoint(
     p2pRank = rank_ <= peer ? 0 : 1;
     isSendRecvSelf = rank_ == peer;
     p2pTargetRank = isSendRecvSelf ? 0 : 1 - p2pRank;
+    if (!coalescing_state_) {
+      seqP2P_++;
+    }
   }
 
   auto comm = getXCCLComm(key, device, opType, p2pRank, isSendRecvSelf);
