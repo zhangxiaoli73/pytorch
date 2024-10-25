@@ -309,6 +309,10 @@ class TORCH_API ProcessGroupXCCL : public Backend {
       std::vector<std::vector<at::Tensor>>& inputTensors,
       const ScatterOptions& opts = ScatterOptions()) override;
 
+  void setSequenceNumberForGroup() override;
+
+  uint64_t getSequenceNumberForGroup() override;
+
  protected:
   std::unordered_map<std::string, at::xpu::XPUStream> xcclStreamsMap_;
   std::unordered_map<std::string, at::xpu::XPUEvent> xcclEventsMap_;
@@ -322,6 +326,7 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   bool blockingWait_ = false;
   static thread_local uint64_t xcclActiveGroupCounter_;
   uint64_t seqCollective_{0};
+  uint64_t seqP2P_{0};
 
  private:
   std::mutex kvs_mutex;
