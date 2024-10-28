@@ -393,6 +393,44 @@ class TORCH_API Backend : public torch::CustomClassHolder {
     bound_device_id_ = device;
   }
 
+  // Checks for NCCL errors and sets an appropriate exception_ptr.
+  virtual void checkAndSetException();
+
+  virtual bool checkTimeout(
+        std::optional<std::chrono::milliseconds> timeout = std::nullopt) = {
+  auto currentTimepoint = std::chrono::steady_clock::now();
+  auto timeElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      currentTimepoint - workStartTime_);
+  auto workTimeout = timeout ? *timeout : opTimeout_;
+
+  if (timeElapsed < workTimeout)
+    return false;
+
+  // Timed out
+
+  // There is already an error, we don't override it
+  if (exception())
+    return true;
+
+  std::string exceptionMsg = c10::str(
+      logPrefix(),
+      "Watchdog caught collective operation timeout: ",
+      *this,
+      " ran for ",
+      timeElapsed.count(),
+      " milliseconds before timing out.");
+
+  LOG(ERROR) << exceptionMsg;
+  std::exception_ptr exception_ptr =
+      std::make_exception_ptr(C10_BUILD_ERROR(DistBackendError, exceptionMsg));
+  setException(exception_ptr);
+  return true;
+}
+
+
+  }
+
+
  protected:
   // Implementations of this interface need to call this to setup
   // appropriate logging etc.
@@ -411,6 +449,9 @@ class TORCH_API Backend : public torch::CustomClassHolder {
   std::function<void(std::shared_ptr<WorkInfo>)> onCompletionHook_;
 
   std::optional<at::Device> bound_device_id_;
+
+  // Time point representing when the work started.
+  std::chrono::time_point<std::chrono::steady_clock> workStartTime_;
 };
 
 } // namespace c10d

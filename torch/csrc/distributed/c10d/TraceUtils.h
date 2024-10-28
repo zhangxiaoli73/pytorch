@@ -45,6 +45,14 @@ struct ProcessGroupStatus {
   // the sizes of the last work completed
   size_t lastCompletedNumelIn;
   size_t lastCompletedNumelOut;
+
+  // some basic information of a backend
+  size_t pg_id;
+  size_t rank;
+  size_t global_rank;
+
+  string pg_desc_;
+  string pg_uid_;
 };
 
 inline std::string getTraceStartKey(const std::string& pgName, int rank) {
