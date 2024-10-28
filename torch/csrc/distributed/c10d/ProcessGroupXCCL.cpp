@@ -102,7 +102,7 @@ void check_xpu_single_tensor(
 
 int64_t check_xpu_tensors_same_device(const std::vector<at::Tensor>& tensors) {
   TORCH_CHECK_WITH(
-      ValueError, tensors.size() == 0, "Tensor list must be nonempty");
+      ValueError, tensors.size() != 0, "Tensor list must be nonempty");
 
   const auto& first = tensors.front();
 
