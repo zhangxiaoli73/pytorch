@@ -1063,6 +1063,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::_broadcast_oop(
         auto xcclDataType = getXcclDataType(input.scalar_type());
         ccl::broadcast(
             input.data_ptr(),
+            output.data_ptr(),
             (size_t)input.numel(),
             xcclDataType,
             root,
