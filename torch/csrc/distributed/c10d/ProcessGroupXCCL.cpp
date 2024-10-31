@@ -815,6 +815,61 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::pointToPoint(
 //      OpType::SCATTER);
 //}
 //
+void ProcessGroupXCCL::allgather_base_impl(at::Tensor& input, at::Tensor& output,
+      const AllgatherOptions& opts, c10::Stream stream, OpType opType) {
+      // from C10d stream to Device stream
+      auto sycl_queue = at::xpu::XPUStream(stream).queue();
+      auto device = input.device();
+      const auto key = std::to_string(device.index());
+      auto comm = getXCCLComm(key, device, opType);
+      auto ccl_stream = ccl::create_stream(sycl_queue);
+
+      auto xcclDataType = getXcclDataType(input.scalar_type());
+      ccl::allgather(
+        input.data_ptr(),
+        output.data_ptr(),
+        (size_t)input.numel(),
+        xcclDataType,
+        *comm,
+        ccl_stream);
+      return;
+}
+
+void ProcessGroupXCCL::allgather_impl(at::Tensor& input, std::vector<at::Tensor>& outputs,
+      const AllgatherOptions& opts, c10::Stream stream, OpType opType) {
+      // from C10d stream to Device stream
+      auto sycl_queue = at::xpu::XPUStream(stream).queue();
+      auto device = input.device();
+      const auto key = std::to_string(device.index());
+      auto comm = getXCCLComm(key, device, opType);
+      auto ccl_stream = ccl::create_stream(sycl_queue);
+
+      bool same_size = check_same_size(outputs);
+      if (same_size) {
+        // Flatten a vector of tensors into a single, stacked tensor.
+        at::Tensor outputFlattened = newLikeFlat(outputs);
+        auto xcclDataType = getXcclDataType(input.scalar_type());
+        ccl::allgather(
+          input.data_ptr(),
+          outputFlattened.data_ptr(),
+          (size_t)input.numel(),
+          xcclDataType,
+          *comm,
+          ccl_stream);
+        return;
+      } else {
+        const auto num_reduces = outputs.size();
+        for (const int i : c10::irange(num_reduces)) {
+          auto& output = outputs[i];
+          auto& inputTensor = (i == rank_) ? input : output;
+          auto broadcastOpts = BroadcastOptions{
+              static_cast<int64_t>(i), static_cast<int64_t>(0), opts.timeout};
+          broadcast_impl(inputTensor, output, broadcastOpts, stream, opType);
+        }
+        return;
+      }
+}
+
 void ProcessGroupXCCL::allreduce_impl(at::Tensor& input, at::Tensor& output,
       const AllreduceOptions& opts, c10::Stream stream, OpType opType) {
       auto xcclDataType = getXcclDataType(input.scalar_type(), true);
@@ -846,13 +901,22 @@ void ProcessGroupXCCL::broadcast_impl(at::Tensor& input, at::Tensor& output,
       const auto key = std::to_string(device.index());
       auto comm = getXCCLComm(key, device, opType);
       auto ccl_stream = ccl::create_stream(sycl_queue);
+      // todo: upgrade oneCCL to latest
       ccl::broadcast(
-            input.data_ptr(),
-            (size_t)input.numel(),
-            xcclDataType,
-            root,
-            *comm,
-            ccl_stream);
+        input.data_ptr(),
+        (size_t)input.numel(),
+        xcclDataType,
+        root,
+        *comm,
+        ccl_stream);
+//      ccl::broadcast(
+//        input.data_ptr(),
+//        output.data_ptr(),
+//        (size_t)input.numel(),
+//        xcclDataType,
+//        root,
+//        *comm,
+//        ccl_stream);
       return;
   }
 

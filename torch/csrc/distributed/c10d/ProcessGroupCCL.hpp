@@ -21,6 +21,7 @@
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/PrefixStore.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
+#include <torch/csrc/distributed/c10d/ParamCommsUtils.hpp>
 #include <ATen/DynamicLibrary.h>
 #include <c10/core/Stream.h>
 #include <c10/core/StreamGuard.h>
@@ -269,15 +270,15 @@ class TORCH_API ProcessGroupCCL : public Backend {
 //      const ReduceOptions& opts = ReduceOptions()) override;
 //
 //
-//  c10::intrusive_ptr<Work> allgather(
-//      std::vector<std::vector<at::Tensor>>& outputTensors,
-//      std::vector<at::Tensor>& inputTensors,
-//      const AllgatherOptions& opts = AllgatherOptions()) override;
-//
-//  c10::intrusive_ptr<Work> _allgather_base(
-//      at::Tensor& outputbuffer,
-//      at::Tensor& inputbuffer,
-//      const AllgatherOptions& opts = AllgatherOptions()) override;
+  c10::intrusive_ptr<Work> allgather(
+      std::vector<std::vector<at::Tensor>>& outputTensors,
+      std::vector<at::Tensor>& inputTensors,
+      const AllgatherOptions& opts = AllgatherOptions()) override;
+
+  c10::intrusive_ptr<Work> _allgather_base(
+      at::Tensor& outputbuffer,
+      at::Tensor& inputbuffer,
+      const AllgatherOptions& opts = AllgatherOptions()) override;
 //
 //  c10::intrusive_ptr<Work> allgather_into_tensor_coalesced(
 //      std::vector<at::Tensor>& outputs,
@@ -346,6 +347,14 @@ class TORCH_API ProcessGroupCCL : public Backend {
       T opts,
       OpType opType);
 
+  template <typename Fn, typename T>
+  c10::intrusive_ptr<Work> collective(
+      at::Tensor& input,
+      std::vector<at::Tensor>& outputs,
+      Fn fn,
+      T opts,
+      OpType opType);
+
   c10::Stream getCCLStream(const std::string& deviceKey,at::Device& device);
   virtual void allreduce_impl(at::Tensor& input, at::Tensor& output,
       const AllreduceOptions& opts, c10::Stream stream, OpType opType) {
@@ -361,6 +370,20 @@ class TORCH_API ProcessGroupCCL : public Backend {
             "Backend ", getBackendName(), " does not implement endCoalescing"));
   }
 
+  virtual void allgather_impl(at::Tensor& input, std::vector<at::Tensor>& outputs,
+      const AllgatherOptions& opts, c10::Stream stream, OpType opType) {
+      TORCH_CHECK( false,
+        c10::str(
+            "Backend ", getBackendName(), " does not implement endCoalescing"));
+  }
+
+  virtual void allgather_base_impl(at::Tensor& input, at::Tensor& output,
+      const AllgatherOptions& opts, c10::Stream stream, OpType opType) {
+      TORCH_CHECK( false,
+        c10::str(
+            "Backend ", getBackendName(), " does not implement endCoalescing"));
+  }
+
 
   virtual c10::intrusive_ptr<ProcessGroupCCL::WorkCCL> initCCLWork(
       at::Device& device,
@@ -370,6 +393,29 @@ class TORCH_API ProcessGroupCCL : public Backend {
       const std::vector<at::Tensor>& inputs = {},
       const std::vector<at::Tensor>& outputs = {});
 
+  void record_params(std::vector<at::Tensor>& inputTensors,
+    std::vector<at::Tensor>& outputTensors, int rootRank,
+    std::string collName, std::vector<int64_t> inSplitSizes = {},
+    std::vector<int64_t> outSplitSizes = {}) {
+     RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(this->pg_uid_, this->pg_desc_), // PG name tuple
+      inputTensors,
+      outputTensors,
+      rootRank, // root rank
+      std::move(collName), // collective name
+      inputTensors[0].numel(), // inNelems
+      outputTensors[0].numel(), // outNelems
+      inputTensors[0].scalar_type(), // dType
+      inSplitSizes,
+      outSplitSizes,
+      globalRankStart,
+      globalRankStride,
+      this->getSize()); // worldSize
+      return;
+  }
+
   protected:
       uint64_t seqCollective_{0};
       std::unordered_map<std::string, c10::Stream> cclStreamsMap_;
@@ -377,6 +423,10 @@ class TORCH_API ProcessGroupCCL : public Backend {
 
       // Mutex to guard maps like devNCCLCommMap_.
       std::mutex mutex_;
+
+  private:
+      int globalRankStart;
+      int globalRankStride;
 };
 
 } // namespace c10d

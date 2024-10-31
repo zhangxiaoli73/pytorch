@@ -18,7 +18,6 @@
 #include <c10/util/irange.h>
 #include <c10/util/thread_name.h>
 #include <torch/csrc/distributed/c10d/NanCheck.hpp>
-#include <torch/csrc/distributed/c10d/ParamCommsUtils.hpp>
 #include <torch/csrc/distributed/c10d/PrefixStore.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroupCCL.hpp>
 #include <torch/csrc/distributed/c10d/TraceUtils.h>
@@ -450,6 +449,47 @@ c10::intrusive_ptr<ProcessGroupCCL::WorkCCL> ProcessGroupCCL::initCCLWork(
 template <typename Fn, typename T>
 c10::intrusive_ptr<Work> ProcessGroupCCL::collective(
       at::Tensor& input,
+      std::vector<at::Tensor>& outputs,
+      Fn fn,
+      T opts,
+      OpType opType) {
+      auto device = input.device();
+      const auto key = std::to_string(device.index());
+      auto stream = getCCLStream(key, device);
+      syncStream(device, cclEventsMap_.at(key), stream);
+
+      c10::intrusive_ptr<ProcessGroupCCL::WorkCCL> work;
+      work = initCCLWork(device, rank_, opType);
+
+      work->outputs_ = std::make_shared<std::vector<at::Tensor>>(outputs);
+
+      // todo: zl_debug why do we need gpuGuard here?
+//      at::xpu::OptionalXPUGuard gpuGuard(device);
+//      for (const auto i : c10::irange(inputs.size())) {
+//        c10::xpu::XPUCachingAllocator::recordStream(
+//            tensor.storage().data_ptr(), stream);
+//        allreduce_impl(tensor, tensor, device, stream, OpType::ALLREDUCE);
+//      }
+
+      (this->*fn)(input, outputs, opts, stream, opType);
+      work->cclEndEvent_->record(stream);
+
+      // todo: stream guard for c10::Stream?
+//      std::vector<c10::Stream> streams = {stream.unwrap()};
+//      c10::MultiStreamGuard streamGuard(streams);
+      std::vector<at::Device> devices{device};
+      work->future_ = c10::make_intrusive<at::ivalue::Future>(
+          c10::ListType::create(c10::TensorType::get()), devices);
+      work->future_->markCompleted(at::IValue(*work->outputs_));
+      //todo: zl_debug add it back
+      work->blockingWait_ = false; //blockingWait_;
+
+      return work;
+
+ }
+template <typename Fn, typename T>
+c10::intrusive_ptr<Work> ProcessGroupCCL::collective(
+      at::Tensor& input,
       at::Tensor& output,
       Fn fn,
       T opts,
@@ -462,7 +502,7 @@ c10::intrusive_ptr<Work> ProcessGroupCCL::collective(
       c10::intrusive_ptr<ProcessGroupCCL::WorkCCL> work;
       work = initCCLWork(device, rank_, opType);
 
-//      work->outputs_ = std::make_shared<std::vector<at::Tensor>>({output});
+      work->outputs_ = std::make_shared<std::vector<at::Tensor>>(std::vector<at::Tensor>{output});
 
       // todo: zl_debug why do we need gpuGuard here?
 //      at::xpu::OptionalXPUGuard gpuGuard(device);
@@ -473,6 +513,7 @@ c10::intrusive_ptr<Work> ProcessGroupCCL::collective(
 //      }
 
       (this->*fn)(input, output, opts, stream, opType);
+
       work->cclEndEvent_->record(stream);
 
       // todo: stream guard for c10::Stream?
@@ -493,27 +534,46 @@ c10::intrusive_ptr<Work> ProcessGroupCCL::broadcast(
       const BroadcastOptions& opts) {
   TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
   auto tensor = tensors.back();
-
-  // @lint-ignore CLANGTIDY
-  RECORD_PARAM_COMMS_DATA(
-      static_cast<int>(
-          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-      tensors, // inputTensors
-      tensors, // outputTensors
-      opts.rootRank, // root rank
-      "broadcast", // collective name
-      tensor.numel(), // inNelems
-      tensor.numel(), // outNelems
-      tensor.scalar_type(), // dType
-      std::vector<int64_t>(), // inSplitSizes
-      std::vector<int64_t>(), // outSplitSizes
-      -1, // globalRankStart
-      -1, // globalRankStride
-      this->getSize()); // worldSize
-
+  record_params(tensors, tensors, opts.rootRank, "broadcast");
   return collective(tensor, tensor, &ProcessGroupCCL::broadcast_impl, opts, OpType::BROADCAST);
   }
+
+c10::intrusive_ptr<Work> ProcessGroupCCL::allgather(
+  std::vector<std::vector<at::Tensor>>& outputTensors,
+  std::vector<at::Tensor>& inputTensors,
+  const AllgatherOptions& opts) {
+  TORCH_CHECK(inputTensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
+  // @lint-ignore CLANGTIDY
+  auto inputTensor = inputTensors.back();
+//  check_gpu_single_tensor(inputTensor);
+  // @lint-ignore CLANGTIDY
+  auto outputTensors_ = outputTensors.back();
+  record_params(inputTensors, outputTensors_, rank_, "all_gather");
+  return collective(inputTensor, outputTensors_, &ProcessGroupCCL::allgather_impl, opts, OpType::ALLGATHER);
+}
+
+c10::intrusive_ptr<Work> ProcessGroupCCL::_allgather_base(
+  at::Tensor& outputbuffer,
+  at::Tensor& inputbuffer,
+  const AllgatherOptions& opts) {
+
+//  check_gpu_single_tensor(input_tensor);
+//  check_gpu_single_tensor(output_tensor);
+
+  if (inputbuffer.dtype() != outputbuffer.dtype()) {
+    C10_THROW_ERROR(
+        TypeError, "output tensor must have the same type as input tensor");
+  }
+
+  if (inputbuffer.numel() * size_ != outputbuffer.numel()) {
+    C10_THROW_ERROR(
+        ValueError,
+        "output tensor size must be equal to world_size times input tensor size");
+  }
+  std::cout << "zl_debug  before allgather collectives " << std::endl;
+//  record_params(&{outputbuffer}, &{inputbuffer}, rank_, "_allgather_base");
+  return collective(inputbuffer, outputbuffer, &ProcessGroupCCL::allgather_base_impl, opts, OpType::_ALLGATHER_BASE);
+}
 
 c10::intrusive_ptr<Work> ProcessGroupCCL::allreduce(
   std::vector<at::Tensor>& tensors,
@@ -524,22 +584,7 @@ c10::intrusive_ptr<Work> ProcessGroupCCL::allreduce(
 //      check_xpu_single_tensor(tensor);
 
       // @lint-ignore CLANGTIDY
-      RECORD_PARAM_COMMS_DATA(
-          static_cast<int>(
-              this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
-          std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
-          tensors, // inputTensors
-          tensors, // outputTensors
-          rank_, // rank
-          "allreduce", // collective name
-          tensor.numel(), // inNelems
-          tensor.numel(), // outNelems
-          tensor.scalar_type(), // dType
-          std::vector<int64_t>(), // inSplitSizes
-          std::vector<int64_t>(), // outSplitSizes
-          -1, // globalRankStart
-          -1, // globalRankStride
-          size_); // worldSize
+      record_params(tensors, tensors, rank_, "allreduce");
 
       auto device = tensor.device();
       const auto key = std::to_string(device.index());
