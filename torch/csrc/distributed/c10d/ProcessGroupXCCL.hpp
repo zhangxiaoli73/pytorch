@@ -93,6 +93,14 @@ class TORCH_API ProcessGroupXCCL : public ProcessGroupCCL {
   void allreduce_impl(at::Tensor& input, at::Tensor& output,
       const AllreduceOptions& opts, c10::Stream stream, OpType opType) override;
 
+  void broadcast_impl(at::Tensor& input, at::Tensor& output,
+      const BroadcastOptions& opts, c10::Stream stream, OpType opType) override;
+
+//  c10::intrusive_ptr<Work> allreduce(
+//      std::vector<at::Tensor>& tensors,
+//      const AllreduceOptions& opts = AllreduceOptions()) override;
+
+
   template <typename Fn>
   c10::intrusive_ptr<Work> collective(
       at::Tensor& input,

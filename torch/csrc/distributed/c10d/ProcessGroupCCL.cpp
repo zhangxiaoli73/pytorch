@@ -447,6 +447,74 @@ c10::intrusive_ptr<ProcessGroupCCL::WorkCCL> ProcessGroupCCL::initCCLWork(
   return r;
 }
 
+template <typename Fn, typename T>
+c10::intrusive_ptr<Work> ProcessGroupCCL::collective(
+      at::Tensor& input,
+      at::Tensor& output,
+      Fn fn,
+      T opts,
+      OpType opType) {
+      auto device = input.device();
+      const auto key = std::to_string(device.index());
+      auto stream = getCCLStream(key, device);
+      syncStream(device, cclEventsMap_.at(key), stream);
+
+      c10::intrusive_ptr<ProcessGroupCCL::WorkCCL> work;
+      work = initCCLWork(device, rank_, opType);
+
+//      work->outputs_ = std::make_shared<std::vector<at::Tensor>>({output});
+
+      // todo: zl_debug why do we need gpuGuard here?
+//      at::xpu::OptionalXPUGuard gpuGuard(device);
+//      for (const auto i : c10::irange(inputs.size())) {
+//        c10::xpu::XPUCachingAllocator::recordStream(
+//            tensor.storage().data_ptr(), stream);
+//        allreduce_impl(tensor, tensor, device, stream, OpType::ALLREDUCE);
+//      }
+
+      (this->*fn)(input, output, opts, stream, opType);
+      work->cclEndEvent_->record(stream);
+
+      // todo: stream guard for c10::Stream?
+//      std::vector<c10::Stream> streams = {stream.unwrap()};
+//      c10::MultiStreamGuard streamGuard(streams);
+      std::vector<at::Device> devices{device};
+      work->future_ = c10::make_intrusive<at::ivalue::Future>(
+          c10::ListType::create(c10::TensorType::get()), devices);
+      work->future_->markCompleted(at::IValue(*work->outputs_));
+      //todo: zl_debug add it back
+      work->blockingWait_ = false; //blockingWait_;
+
+      return work;
+  }
+
+c10::intrusive_ptr<Work> ProcessGroupCCL::broadcast(
+      std::vector<at::Tensor>& tensors,
+      const BroadcastOptions& opts) {
+  TORCH_CHECK(tensors.size() == 1, MULTI_DEVICE_ERROR_MSG);
+  auto tensor = tensors.back();
+
+  // @lint-ignore CLANGTIDY
+  RECORD_PARAM_COMMS_DATA(
+      static_cast<int>(
+          this->getSequenceNumberForGroup() + 1), // seq + 1 to match collective
+      std::make_tuple(pg_uid_, pg_desc_), // PG name tuple
+      tensors, // inputTensors
+      tensors, // outputTensors
+      opts.rootRank, // root rank
+      "broadcast", // collective name
+      tensor.numel(), // inNelems
+      tensor.numel(), // outNelems
+      tensor.scalar_type(), // dType
+      std::vector<int64_t>(), // inSplitSizes
+      std::vector<int64_t>(), // outSplitSizes
+      -1, // globalRankStart
+      -1, // globalRankStride
+      this->getSize()); // worldSize
+
+  return collective(tensor, tensor, &ProcessGroupCCL::broadcast_impl, opts, OpType::BROADCAST);
+  }
+
 c10::intrusive_ptr<Work> ProcessGroupCCL::allreduce(
   std::vector<at::Tensor>& tensors,
   const AllreduceOptions& opts) {

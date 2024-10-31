@@ -835,6 +835,27 @@ void ProcessGroupXCCL::allreduce_impl(at::Tensor& input, at::Tensor& output,
             ccl_stream);
       return;
   }
+
+void ProcessGroupXCCL::broadcast_impl(at::Tensor& input, at::Tensor& output,
+  const BroadcastOptions& opts, c10::Stream stream, OpType opType) {
+      const auto root = opts.rootRank + opts.rootTensor;
+      auto xcclDataType = getXcclDataType(input.scalar_type());
+      // from C10d stream to Device stream
+      auto sycl_queue = at::xpu::XPUStream(stream).queue();
+      auto device = input.device();
+      const auto key = std::to_string(device.index());
+      auto comm = getXCCLComm(key, device, opType);
+      auto ccl_stream = ccl::create_stream(sycl_queue);
+      ccl::broadcast(
+            input.data_ptr(),
+            (size_t)input.numel(),
+            xcclDataType,
+            root,
+            *comm,
+            ccl_stream);
+      return;
+  }
+
 //
 //c10::intrusive_ptr<Work> ProcessGroupXCCL::allreduce(
 //    std::vector<at::Tensor>& tensors,
