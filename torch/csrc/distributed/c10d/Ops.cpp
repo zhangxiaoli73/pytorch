@@ -445,6 +445,7 @@ IMPL_ALLTOALL_BASE(XPU)
 IMPL_ALLTOALL_BASE(CUDA)
 IMPL_ALLTOALL_BASE(PrivateUse1)
 
+// NOLINTBEGIN(performance-unnecessary-value-param)
 #define IMPL_BARRIER(DEV)                                                    \
   c10::intrusive_ptr<Work> barrier##DEV(                                     \
       at::Tensor /* unused */,                                               \
@@ -460,9 +461,11 @@ IMPL_BARRIER(CPU)
 IMPL_BARRIER(XPU)
 IMPL_BARRIER(CUDA)
 IMPL_BARRIER(PrivateUse1)
+// NOLINTEND(performance-unnecessary-value-param)
 // NOLINTEND(cppcoreguidelines-pro-type-const-cast)
 
 void monitored_barrier_CPU(
+    // NOLINTNEXTLINE(performance-unnecessary-value-param)
     at::Tensor /* unused */,
     const c10::intrusive_ptr<::c10d::ProcessGroup>& process_group,
     const std::vector<int64_t>& device_ids,
