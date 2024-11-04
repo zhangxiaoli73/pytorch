@@ -51,6 +51,37 @@ namespace {
       cclEvent.record(currentStream);
       cclEvent.block(cclStream);
     }
+
+    int64_t check_gpu_tensors_same_device(const std::vector<at::Tensor>& tensors) {
+      if (tensors.size() == 0) {
+        C10_THROW_ERROR(ValueError, "Tensor list must be nonempty");
+      }
+      const auto& first = tensors.front();
+
+      int64_t total_numel = 0;
+      for (const auto& t : tensors) {
+        if (!t.is_cuda() || t.is_sparse()) {
+          C10_THROW_ERROR(ValueError, "Tensors must be CUDA and dense");
+        }
+        if (t.scalar_type() != first.scalar_type()) {
+          C10_THROW_ERROR(TypeError, "Tensors must have identical type");
+        }
+        if (!t.is_non_overlapping_and_dense()) {
+          C10_THROW_ERROR(ValueError, "Tensors must be non-overlapping and dense");
+        }
+        // If we're in this function, the user called a _coalesced collective
+        // on a set of tensors with potentially different sizes and strides.
+        // Therefore, we don't check for matching sizes and strides,
+        // but we do double-check tensors are on the same device.
+        TORCH_CHECK_WITH(
+            ValueError,
+            t.get_device() == tensors[0].get_device(),
+            "Expected list of tensors on the same device");
+        total_numel += t.numel();
+      }
+
+      return total_numel;
+    }
 }
 constexpr int64_t kSynchronizeBusyWaitMillis = 10;
 
@@ -487,6 +518,51 @@ c10::intrusive_ptr<Work> ProcessGroupCCL::collective(
       return work;
 
  }
+
+template <typename Fn, typename T>
+c10::intrusive_ptr<Work> ProcessGroupCCL::collectiveCoalesced(
+      std::vector<at::Tensor>& inputs,
+      std::vector<at::Tensor>& outputs,
+      Fn fn,
+      T opts,
+      OpType opType) {
+   // Bump collective counter
+      seqCollective_++;
+      op_id_++;
+
+      auto device = inputs[0].device();
+      const auto key = std::to_string(device.index());
+      auto stream = getCCLStream(key, device);
+      syncStream(device, cclEventsMap_.at(key), stream);
+
+      c10::intrusive_ptr<ProcessGroupCCL::WorkCCL> work;
+      work = initCCLWork(device, rank_, opType);
+
+      work->outputs_ = std::make_shared<std::vector<at::Tensor>>(outputs);
+
+      // todo: check inputs and outputs size
+      this->groupStart();
+      for (const auto i : c10::irange(inputs.size())) {
+          (this->*fn)(inputs[i], outputs[i], opts, stream, opType);
+      }
+      this->groupEnd();
+
+      work->cclEndEvent_->record(stream);
+
+      // todo: stream guard for c10::Stream?
+//      std::vector<c10::Stream> streams = {stream.unwrap()};
+//      c10::MultiStreamGuard streamGuard(streams);
+      std::vector<at::Device> devices{device};
+      work->future_ = c10::make_intrusive<at::ivalue::Future>(
+          c10::ListType::create(c10::TensorType::get()), devices);
+      work->future_->markCompleted(at::IValue(*work->outputs_));
+      //todo: zl_debug add it back
+      work->blockingWait_ = false; //blockingWait_;
+
+      return work;
+  }
+
+
 template <typename Fn, typename T>
 c10::intrusive_ptr<Work> ProcessGroupCCL::collective(
       at::Tensor& input,
@@ -494,6 +570,9 @@ c10::intrusive_ptr<Work> ProcessGroupCCL::collective(
       Fn fn,
       T opts,
       OpType opType) {
+      // Bump collective counter
+      seqCollective_++;
+      op_id_++;
       auto device = input.device();
       const auto key = std::to_string(device.index());
       auto stream = getCCLStream(key, device);
@@ -573,6 +652,14 @@ c10::intrusive_ptr<Work> ProcessGroupCCL::_allgather_base(
   std::cout << "zl_debug  before allgather collectives " << std::endl;
 //  record_params(&{outputbuffer}, &{inputbuffer}, rank_, "_allgather_base");
   return collective(inputbuffer, outputbuffer, &ProcessGroupCCL::allgather_base_impl, opts, OpType::_ALLGATHER_BASE);
+}
+
+c10::intrusive_ptr<Work> ProcessGroupCCL::allreduce_coalesced(
+      std::vector<at::Tensor>& tensors,
+      const AllreduceCoalescedOptions& opts) {
+  check_gpu_tensors_same_device(tensors);
+  record_params(tensors, tensors, rank_, "allreduce_coalesced");
+  return collectiveCoalesced(tensors, tensors, &ProcessGroupCCL::allreduce_impl, opts, OpType::COALESCED);
 }
 
 c10::intrusive_ptr<Work> ProcessGroupCCL::allreduce(

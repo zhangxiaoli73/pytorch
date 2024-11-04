@@ -260,10 +260,10 @@ class TORCH_API ProcessGroupCCL : public Backend {
       std::vector<at::Tensor>& tensors,
       const BroadcastOptions& opts = BroadcastOptions()) override;
 
-//  c10::intrusive_ptr<Work> allreduce_coalesced(
-//      std::vector<at::Tensor>& tensors,
-//      const AllreduceCoalescedOptions& opts =
-//          AllreduceCoalescedOptions()) override;
+  c10::intrusive_ptr<Work> allreduce_coalesced(
+      std::vector<at::Tensor>& tensors,
+      const AllreduceCoalescedOptions& opts =
+          AllreduceCoalescedOptions()) override;
 //
 //  c10::intrusive_ptr<Work> reduce(
 //      std::vector<at::Tensor>& tensors,
@@ -355,7 +355,28 @@ class TORCH_API ProcessGroupCCL : public Backend {
       T opts,
       OpType opType);
 
+  template <typename Fn, typename T>
+  c10::intrusive_ptr<Work> collectiveCoalesced(
+      std::vector<at::Tensor>& input,
+      std::vector<at::Tensor>& output,
+      Fn fn,
+      T opts,
+      OpType opType);
+
   c10::Stream getCCLStream(const std::string& deviceKey,at::Device& device);
+
+  virtual void groupStart() {
+    TORCH_CHECK(false,
+            c10::str(
+            "Backend ", getBackendName(), " does not implement groupStart"));
+  }
+
+  virtual void groupEnd() {
+    TORCH_CHECK(false,
+            c10::str(
+            "Backend ", getBackendName(), " does not implement groupEnd"));
+  }
+
   virtual void allreduce_impl(at::Tensor& input, at::Tensor& output,
       const AllreduceOptions& opts, c10::Stream stream, OpType opType) {
       TORCH_CHECK(false,
@@ -417,7 +438,19 @@ class TORCH_API ProcessGroupCCL : public Backend {
   }
 
   protected:
+
+      // Counting for the sequential number of collective call.
+      // (specifically, how many actual kernels we launched, which differs from
+      // op_id_ when coalescing is enabled)
       uint64_t seqCollective_{0};
+
+      // Counting for the sequential number of P2P calls.
+      uint64_t seqP2P_{0};
+
+      // Incrementing counter for logical operations (collective or p2p) issued on
+      // the ProcessGroup
+      uint64_t op_id_{0};
+
       std::unordered_map<std::string, c10::Stream> cclStreamsMap_;
       std::unordered_map<std::string, c10::Event> cclEventsMap_;
 
