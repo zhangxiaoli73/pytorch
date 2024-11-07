@@ -291,9 +291,6 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
     }
   }
 
-  std::shared_ptr<xcclComm_t> XCCLComm;
-  XCCL_KVS kvs = get_kvs(rank_, *store_);
-
   bool batchP2P = xcclActiveGroupCounter_ > 0;
   bool singleP2POp = isP2POp(opType, batchP2P);
 
@@ -320,7 +317,8 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   ccl::vector_class<ccl::pair_class<int, ccl::device>> devs_rank;
   devs_rank.emplace_back(rank, ccl::create_device(q.get_device()));
 
-  auto xccl_kvs = get_kvs(rank_, *store_);
+  std::shared_ptr<xcclComm_t> XCCLComm;
+  auto xccl_kvs = get_kvs(rank_, *store_, true, p2pRank);
   auto comms = ccl::create_communicators(numRanks, devs_rank, ctx, xccl_kvs);
   XCCLComm = std::make_shared<xcclComm_t>(std::move(comms[0]));
 

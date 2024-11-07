@@ -372,8 +372,8 @@ class ShardedTensor(ShardedTensorBase):
         """
         if dist.get_backend(self._process_group) == dist.Backend.NCCL:
             return torch.device(torch.cuda.current_device())
-        elif dist.get_backend(self._process_group) == dist.Backend.NCCL:
-            return torch.device(torch.acc.current_device())
+        elif dist.get_backend(self._process_group) == dist.Backend.XCCL:
+            return torch.device(torch.xpu.current_device())
         return torch.device("cpu")
 
     def gather(  # type: ignore[override]

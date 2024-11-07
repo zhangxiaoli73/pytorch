@@ -539,6 +539,7 @@ def _no_dispatch_record_stream(tensor: torch.Tensor, stream: torch.Stream) -> No
     if tensor.device.type not in [
         "cuda",
         "mtia",
+        "xpu",
         torch._C._get_privateuse1_backend_name(),
     ]:
         return
