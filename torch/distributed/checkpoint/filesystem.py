@@ -140,7 +140,7 @@ class _OverlappingCpuLoader(_TensorLoader):
         )
         self.device_module = _get_device_module(self.device_type)
         self.stream = cast(
-            torch.cuda.Stream, stream or self.device_module.current_stream()
+            torch.acc.Stream, stream or self.device_module.current_stream()
         )
         if self.stream != self.device_module.current_stream():
             self.stream.wait_stream(self.device_module.current_stream())

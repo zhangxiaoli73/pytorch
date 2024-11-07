@@ -51,7 +51,7 @@ class FSDPCommContext:
 
     def lazy_init(self, device: torch.device):
         self.device_handle = _get_device_handle(device.type)
-        if device.type not in ["cuda", "hpu"]:
+        if device.type not in ["cuda", "hpu", "xpu"]:
             raise RuntimeError("FSDP requires streams support")
         # Setting the all-gather/reduce-scatter streams to be higher priority
         # can help avoid some issues where their copies in/out are delayed and
@@ -429,7 +429,7 @@ class FSDPParamGroup:
             # If there was a mistargeted unshard without a corresponding wait,
             # then we wait here and clear the unshard
             if (event := self._all_gather_result.all_gather_event) is not None:
-                torch.cuda.current_stream().wait_event(event)
+                self.device_handle.current_stream().wait_event(event)
             work = self._all_gather_result.all_gather_work
             if isinstance(work, dist.distributed_c10d.Work):
                 work.wait()

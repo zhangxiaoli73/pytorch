@@ -505,16 +505,25 @@ else:
                 # Append the default pg to the first dim groups only if the default pg is compatible with `self.device_type`.
                 # Otherwise, create new pg.
                 ranks = list(range(get_world_size()))
-                dim_group = (
-                    new_group(
+                new_group(
+                    backend="cpu:gloo,cuda:nccl",
+                    ranks=ranks,
+                    group_desc="mesh_default",
+                )
+                if torch.cuda.is_available() and get_backend(default_group) == "gloo":
+                    dim_group = (new_group(
                         backend="cpu:gloo,cuda:nccl",
                         ranks=ranks,
                         group_desc="mesh_default",
-                    )
-                    if torch.cuda.is_available()
-                    and get_backend(default_group) == "gloo"
-                    else default_group
-                )
+                    ))
+                elif torch.xpu.is_available() and get_backend(default_group) == "gloo":
+                    dim_group = (new_group(
+                        backend="cpu:gloo,xpu:nccl",
+                        ranks=ranks,
+                        group_desc="mesh_default",
+                    ))
+                else:
+                    dim_group = default_group
                 dim_group_infos.append(
                     (
                         _get_group_tag(dim_group),

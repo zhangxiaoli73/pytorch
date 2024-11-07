@@ -624,8 +624,8 @@ def powerSGD_hook(
                 for i, original_tensor in enumerate(original_tensors):
                     original_tensor.copy_(tensor[i])
 
-        if torch.cuda.is_available():
-            torch.cuda.synchronize(device)
+        if torch.acc.is_available():
+            torch.acc.synchronize(device)
 
         if state.use_error_feedback:
             # Memorize the local errors.
@@ -842,8 +842,8 @@ def batched_powerSGD_hook(
             state.error_dict[bucket_index] = input_tensor_cp - input_tensor
         # Removing this seemingly unnecessary sync somehow may cause failures.
         # See: https://github.com/pytorch/pytorch/pull/54838
-        if torch.cuda.is_available():
-            torch.cuda.synchronize(device)
+        if torch.acc.is_available():
+            torch.acc.synchronize(device)
         if not state.warm_start:
             state.p_memory_dict.clear()
             state.q_memory_dict.clear()
