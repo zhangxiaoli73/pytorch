@@ -287,6 +287,7 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (devXCCLCommMap_.find(deviceKey) != devXCCLCommMap_.end()) {
+      std::cout << "zl_debug begin to get xccl comm from cache: " << p2pRank << " local_rank: " << rank_ << std::endl;
       return devXCCLCommMap_[deviceKey];
     }
   }
@@ -319,7 +320,9 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
 
   std::shared_ptr<xcclComm_t> XCCLComm;
   auto xccl_kvs = get_kvs(rank_, *store_, true, p2pRank);
+  std::cout << "zl_debug get kvs done in rank: "<< rank << std::endl;
   auto comms = ccl::create_communicators(numRanks, devs_rank, ctx, xccl_kvs);
+  std::cout << "zl_debug get communicator done in rank: "<< rank << std::endl;
   XCCLComm = std::make_shared<xcclComm_t>(std::move(comms[0]));
 
   RECORD_PARAM_COMMS(
@@ -494,7 +497,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::pointToPoint(
       seqP2P_++;
     }
   }
-
+  std::cout << "zl_debug begin to get xccl comm " << std::endl;
   auto comm = getXCCLComm(key, device, opType, p2pRank, isSendRecvSelf);
 
   if (coalescing_state_ & CoalActive) {
@@ -574,6 +577,7 @@ c10::intrusive_ptr<Work> ProcessGroupXCCL::send(
       -1, // globalRankStart
       -1, // globalRankStride
       this->getSize()); // worldSize
+  std::cout << "zl_debug in send with dstRank: "<< dstRank << std::endl;
 
   auto ret = pointToPoint(
       tensor,
