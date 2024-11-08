@@ -332,9 +332,16 @@ class TORCH_API ProcessGroupXCCL : public Backend {
   std::mutex kvs_mutex;
 
   ccl::shared_ptr_class<ccl::kvs> get_kvs(int rank, c10d::Store& store,
-    bool singleP2POp = false, int p2pRank = 0) {
+    bool singleP2POp = false, const std::string& p2pKey = "", int p2pRank = 0) {
     ccl::shared_ptr_class<ccl::kvs> kvs;
     std::string storeKey = "xccl_kvs";
+    std::string storeKey;
+    if (!isSingleP2POp) {
+       storeKey = "xccl_kvs";
+    } else {
+       storeKey = p2pKey;
+    }
+
     // Rank 0 broadcast the bootstrap network information to other ranks
     if (rank == 0 || (singleP2POp && p2pRank == 0)) {
       kvs = ccl::create_main_kvs();

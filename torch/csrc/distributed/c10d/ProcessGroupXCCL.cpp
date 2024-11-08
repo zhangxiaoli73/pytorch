@@ -319,10 +319,10 @@ std::shared_ptr<xcclComm_t> ProcessGroupXCCL::getXCCLComm(
   devs_rank.emplace_back(rank, ccl::create_device(q.get_device()));
 
   std::shared_ptr<xcclComm_t> XCCLComm;
-  auto xccl_kvs = get_kvs(rank_, *store_, true, p2pRank);
-  std::cout << "zl_debug get kvs done in rank: "<< rank << std::endl;
+  auto xccl_kvs = get_kvs(rank_, *store_, true, deviceKey, p2pRank);
+  std::cout << "zl_debug get kvs done in rank: "<< rank << " local_rank: " << rank_  << " deviceKey " << deviceKey << std::endl;
   auto comms = ccl::create_communicators(numRanks, devs_rank, ctx, xccl_kvs);
-  std::cout << "zl_debug get communicator done in rank: "<< rank << std::endl;
+  std::cout << "zl_debug get communicator done in rank: "<< rank << " local rank: " << rank_ << std::endl;
   XCCLComm = std::make_shared<xcclComm_t>(std::move(comms[0]));
 
   RECORD_PARAM_COMMS(
