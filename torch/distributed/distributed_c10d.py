@@ -133,6 +133,7 @@ _MPI_AVAILABLE = True
 _NCCL_AVAILABLE = True
 _GLOO_AVAILABLE = True
 _UCC_AVAILABLE = True
+_XCCL_AVAILABLE = True
 
 _pickler = pickle.Pickler
 _unpickler = pickle.Unpickler
@@ -196,6 +197,14 @@ try:
 except ImportError:
     _UCC_AVAILABLE = False
 
+try:
+    from torch._C._distributed_c10d import ProcessGroupXCCL
+
+    ProcessGroupXCCL.__module__ = "torch.distributed.distributed_c10d"
+    __all__ += ["ProcessGroupXCCL"]
+except ImportError:
+    _XCCL_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 PG_WRAPPER_STORE_PREFIX = "pg_wrapper"
@@ -225,7 +234,7 @@ class Backend(str):
     """
     An enum-like class for backends.
 
-    Available backends: GLOO, NCCL, UCC, MPI, and other registered backends.
+    Available backends: GLOO, NCCL, UCC, MPI, XCCL, and other registered backends.
 
     The values of this class are lowercase strings, e.g., ``"gloo"``. They can
     be accessed as attributes, e.g., ``Backend.NCCL``.
@@ -245,22 +254,25 @@ class Backend(str):
     NCCL = "nccl"
     UCC = "ucc"
     MPI = "mpi"
+    XCCL = "xccl"
 
     _BackendPlugin = namedtuple("_BackendPlugin", ["creator_fn", "extended_api"])
 
     _plugins: Dict[str, _BackendPlugin] = {}
 
-    backend_list = [UNDEFINED, GLOO, NCCL, UCC, MPI]
+    backend_list = [UNDEFINED, GLOO, NCCL, XCCL, UCC, MPI]
 
     # 3rd-party devices can register the default backend support here
     default_device_backend_map: Dict[str, str] = {
         "cpu": GLOO,
         "cuda": NCCL,
+        "xpu": XCCL,
     }
 
     backend_capability: Dict[str, List[str]] = {
         GLOO: ["cpu", "cuda"],
         NCCL: ["cuda"],
+        XCCL: ["xpu"],
         UCC: ["cpu", "cuda"],
         MPI: ["cpu", "cuda"],
     }
@@ -269,6 +281,7 @@ class Backend(str):
         UNDEFINED: ProcessGroup.BackendType.UNDEFINED,
         GLOO: ProcessGroup.BackendType.GLOO,
         NCCL: ProcessGroup.BackendType.NCCL,
+        XCCL: ProcessGroup.BackendType.XCCL,
         UCC: ProcessGroup.BackendType.UCC,
         MPI: ProcessGroup.BackendType.MPI,
     }
@@ -1229,6 +1242,11 @@ def is_ucc_available() -> bool:
     return _UCC_AVAILABLE
 
 
+def is_xccl_available() -> bool:
+    """Check if the XCCL backend is available."""
+    return _XCCL_AVAILABLE
+
+
 def is_backend_available(backend: str) -> bool:
     """
     Check backend availability.
@@ -1503,6 +1521,10 @@ def _set_pg_timeout(timeout: timedelta, group: Optional[ProcessGroup] = None) ->
         if is_nccl_available() and isinstance(backend, ProcessGroupNCCL):
             backends.add(backend)  # type: ignore[arg-type]
         elif is_gloo_available() and isinstance(backend, ProcessGroupGloo):
+            backends.add(backend)  # type: ignore[arg-type]
+    if torch.device("xpu") in devices and is_xccl_available():
+        backend = group._get_backend(torch.device("xpu"))
+        if isinstance(backend, ProcessGroupXCCL):
             backends.add(backend)  # type: ignore[arg-type]
     if len(backends) == 0:
         warnings.warn("Set timeout is now only supported for either nccl or gloo.")
@@ -1964,6 +1986,17 @@ def _new_process_group_helper(
                 backend_prefix_store, group_rank, group_size, timeout=timeout
             )
             backend_type = ProcessGroup.BackendType.UCC
+        elif backend_str == Backend.XCCL:
+            if not is_xccl_available():
+                raise RuntimeError("Distributed package doesn't have XCCL built in")
+            if backend_options is not None:
+                assert isinstance(
+                    backend_options, ProcessGroupXCCL.Options
+                ), "Expected backend_options argument to be of type ProcessGroupXCCL.Options"
+            backend_class = ProcessGroupXCCL(
+                backend_prefix_store, group_rank, group_size
+            )
+            backend_type = ProcessGroup.BackendType.XCCL
         else:
             assert (
                 backend_str.upper() in Backend._plugins
