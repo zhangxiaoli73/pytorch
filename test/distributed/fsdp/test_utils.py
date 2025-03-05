@@ -129,7 +129,7 @@ class TestUtils(TestCase):
         self.assertEqual(torch.sum(x), 0)
 
 
-devices = ("cuda", "hpu")
+devices = ("cuda", "hpu", "xpu")
 instantiate_device_type_tests(TestUtils, globals(), only_for=devices)
 if __name__ == "__main__":
     run_tests()
