@@ -47,6 +47,8 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+global_shards = []
+global_shards_count = 0
 
 """
 [Note: Fully Sharded Module]
@@ -1681,6 +1683,8 @@ class FlatParamHandle:
         # gradient to accumulate with in the post-backward hook
         if hasattr(flat_param, "_saved_grad_shard"):
             delattr(flat_param, "_saved_grad_shard")
+        global global_shards
+        global_shards.append(flat_param.grad)
 
     @contextlib.contextmanager
     def to_cpu(self):
