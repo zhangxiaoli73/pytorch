@@ -39,6 +39,8 @@ from torch.distributed.utils import (
 )
 from torch.utils import _pytree as pytree
 
+global_grad = {}
+global_count = 0
 
 logger = logging.getLogger(__name__)
 
@@ -712,8 +714,14 @@ def _post_backward_hook(
     - Otherwise, the ``_saved_grad_shard`` attribute is the reduced sharded
     gradient (accumulating with any existing gradient).
     """
+    global global_count
+    global global_grad
+
     _log_post_backward_hook(state, handle, logger)
     flat_param = handle.flat_param
+    key = "original_unsharded_grad_" + str(global_count)
+    global_grad[key] = flat_param.grad.clone()
+
     flat_param._post_backward_called = True
     with torch.autograd.profiler.record_function(
         "FullyShardedDataParallel._post_backward_hook"
@@ -768,7 +776,7 @@ def _post_backward_hook(
             _no_dispatch_record_stream(
                 autograd_computed_grad, state._post_backward_stream
             )
-
+            print("zl_debug post backward done")
 
 def _post_backward_reshard_only_hook(
     state: _FSDPState,
@@ -840,6 +848,11 @@ def _reduce_grad(state: _FSDPState, handle: FlatParamHandle) -> None:
     # separate stream and is async and would result in reducing the wrong
     # gradient.
     unsharded_grad = flat_param.grad.data
+    global global_count
+    global global_grad
+    key1 = "unsharded_grad_" + str(global_count)
+    global_grad[key1] = unsharded_grad.clone()
+
     flat_param.grad = None
     padded_unsharded_grad, new_sharded_grad = _get_reduce_scatter_tensors(
         state, unsharded_grad
@@ -851,11 +864,24 @@ def _reduce_grad(state: _FSDPState, handle: FlatParamHandle) -> None:
             if handle._use_fake_reduce
             else state.process_group
         )
+        key2 = "padded_unsharded_grad_" + str(global_count)
+        global_grad[key2] = padded_unsharded_grad.clone()
         dist.reduce_scatter_tensor(
             new_sharded_grad,
             padded_unsharded_grad,
             group=pg,
         )
+        # zl_debug WA
+        '''
+        split_idx = padded_unsharded_grad.size(0) // 2
+        if state.rank == 0:
+            new_sharded_grad.copy_(padded_unsharded_grad[:split_idx])
+        else:
+            new_sharded_grad.copy_(padded_unsharded_grad[split_idx:])
+        '''
+        key3 = "new_sharded_grad_after_reducescatter" + str(global_count)
+        global_grad[key3] = new_sharded_grad.clone()
+        global_count += 1
         if uses_hybrid_sharded_strategy:
             # Don't wait during trace
             if not torch.distributed._functional_collectives.is_torchdynamo_compiling():
@@ -998,6 +1024,7 @@ def _post_backward_use_sharded_grad_views(handle: FlatParamHandle):
     # of immediately after resharding
     handle._use_sharded_grad_views()
     if handle._has_optim_in_backward:
+        print("zl_debug in _post_backward_use_sharded_grad_views")
         handle.prepare_gradient_for_optim()
         for orig_param in handle.flat_param._params:
             # Check for `None` gradient to filter parameters not in the rank
@@ -1192,6 +1219,7 @@ def _finalize_params(
             # sharded gradient from the last synchronized iteration
             return
         if not handle._has_optim_in_backward:
+            print("zl_debug _finalize_params")
             handle.prepare_gradient_for_optim()
         _p_assert(
             hasattr(flat_param, "_post_backward_called"),
