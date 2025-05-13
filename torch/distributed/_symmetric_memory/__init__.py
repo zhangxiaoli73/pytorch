@@ -98,7 +98,7 @@ def get_symm_mem_workspace(group_name: str, min_size: int) -> _SymmetricMemory:
     tensor = _group_name_to_workspace_tensor.get(group_name)
     size = tensor.numel() * tensor.element_size() if tensor is not None else 0
     if tensor is None or size < min_size:
-        if torch.cuda.is_current_stream_capturing():
+        if torch.xpu.is_current_stream_capturing():
             curr_size = 0 if tensor is None else tensor.numel() * tensor.element_size()
             raise RuntimeError(
                 f"get_symm_mem_workspace(): the requested size ({min_size} bytes) "
@@ -113,19 +113,19 @@ def get_symm_mem_workspace(group_name: str, min_size: int) -> _SymmetricMemory:
             (max(size, min_size),),
             [1],
             torch.uint8,
-            torch.device(f"cuda:{torch.cuda.current_device()}"),
+            torch.device(f"xpu:{torch.xpu.current_device()}"),
             group_name,
         )
         _group_name_to_workspace_tensor[group_name] = tensor
     return _SymmetricMemory.rendezvous(tensor)
 
 
-_backend_streams: dict[int, torch.cuda.Stream] = {}
+_backend_streams: dict[int, torch.xpu.Stream] = {}
 
 
-def _get_backend_stream(priority: int = 0) -> torch.cuda.Stream:
+def _get_backend_stream(priority: int = 0) -> torch.xpu.Stream:
     if priority not in _backend_streams:
-        _backend_streams[priority] = torch.cuda.Stream(priority=priority)
+        _backend_streams[priority] = torch.xpu.Stream(priority=priority)
     return _backend_streams[priority]
 
 
@@ -162,7 +162,7 @@ def _pipelined_multi_all_gather_and_consume(
 
     symm_mem.barrier(channel=0)
     backend_stream = _get_backend_stream()
-    backend_stream.wait_stream(torch.cuda.current_stream())
+    backend_stream.wait_stream(torch.xpu.current_stream())
 
     for x, y in zip(shard, ag_out):
         assert x.is_contiguous(), (
@@ -243,7 +243,7 @@ def _pipelined_multi_all_gather_and_consume(
     # and "b" with the first shard_consumer for now.
     copy_shard(dst=local_p2p_bufs, src=shard)
     symm_mem.barrier(channel=1)
-    backend_stream.wait_stream(torch.cuda.current_stream())
+    backend_stream.wait_stream(torch.xpu.current_stream())
 
     # At this point, all ranks have copied their local shard to
     # their local p2p buffer. Each rank can now copy and consume
@@ -252,7 +252,7 @@ def _pipelined_multi_all_gather_and_consume(
 
     for step in range(1, group_size):
         if step % 2 == 0:
-            stream = torch.cuda.current_stream()
+            stream = torch.xpu.current_stream()
         else:
             stream = backend_stream
         remote_rank = (step + rank) % group_size
@@ -265,13 +265,13 @@ def _pipelined_multi_all_gather_and_consume(
         # Copy from input to the all-gather output. Opportunistically overlap
         # it with the last shard_consumer.
         if group_size % 2 == 0:
-            stream = torch.cuda.current_stream()
+            stream = torch.xpu.current_stream()
         else:
             stream = backend_stream
         with stream:
             copy_shard(dst=shards[rank], src=shard)
 
-    torch.cuda.current_stream().wait_stream(backend_stream)
+    torch.xpu.current_stream().wait_stream(backend_stream)
     symm_mem.barrier(channel=0)
 
 
@@ -327,7 +327,7 @@ def _pipelined_produce_and_all2all(
 
     symm_mem.barrier(channel=0)
     backend_stream = _get_backend_stream()
-    backend_stream.wait_stream(torch.cuda.current_stream())
+    backend_stream.wait_stream(torch.xpu.current_stream())
 
     def get_p2p_buf(rank: int, idx: int) -> torch.Tensor:
         assert idx in (0, 1)
@@ -345,7 +345,7 @@ def _pipelined_produce_and_all2all(
     for step in range(1, group_size):
         remote_rank = (rank - step) % group_size
         if step % 2 == 0:
-            stream = torch.cuda.current_stream()
+            stream = torch.xpu.current_stream()
             p2p_buf = local_p2p_buf_1
             remote_p2p_buf = get_p2p_buf(remote_rank, 1)
         else:
@@ -401,7 +401,7 @@ def _pipelined_produce_and_all2all(
             # the correct order, there's very little room for the scheduling
             # order of subsequent kernels to be inconsistent across ranks.
             if step == 2:
-                torch.cuda._sleep(100)
+                torch.xpu._sleep(100)
             chunk_producer((rank + step) % group_size, p2p_buf)
             symm_mem.barrier(channel=step % 2)
             out_chunks[remote_rank].copy_(remote_p2p_buf)
@@ -411,10 +411,10 @@ def _pipelined_produce_and_all2all(
 
     # If the sleep wasn't issued in the above loop, do it now.
     if group_size == 2:
-        torch.cuda._sleep(100)
+        torch.xpu._sleep(100)
 
     chunk_producer(rank, out_chunks[rank])
-    torch.cuda.current_stream().wait_stream(backend_stream)
+    torch.xpu.current_stream().wait_stream(backend_stream)
     symm_mem.barrier(channel=0)
 
 
@@ -635,6 +635,7 @@ def _fused_all_gather_matmul_fallback(
 
 
 @torch.library.impl(lib, "fused_all_gather_matmul", "CUDA")
+@torch.library.impl(lib, "fused_all_gather_matmul", "XPU")
 def _fused_all_gather_matmul(
     A_shard: torch.Tensor,
     Bs: list[torch.Tensor],
@@ -727,7 +728,7 @@ def _fused_all_gather_matmul_native(
     rank = symm_mem.rank
     world_size = symm_mem.world_size
 
-    current_stream = torch.cuda.current_stream()
+    current_stream = torch.xpu.current_stream()
     backend_stream = _get_backend_stream(priority=-1)
 
     symm_mem.barrier()
@@ -739,7 +740,7 @@ def _fused_all_gather_matmul_native(
     A_shards = A.chunk(world_size)
 
     A_shards[rank].copy_(A_shard)
-    if not torch.cuda.is_current_stream_capturing():
+    if not torch.xpu.is_current_stream_capturing():
         _SymmetricMemory.stream_write_value32(A_signals, rank, 1)
     else:
         _SymmetricMemory.memset32(A_signals, offset=rank, val=1, count=1)
@@ -750,7 +751,7 @@ def _fused_all_gather_matmul_native(
         src_buf = symm_mem.get_buffer(src_rank, A_shard.shape, A_shard.dtype)
         with backend_stream:
             A_shards[src_rank].copy_(src_buf)
-            if not torch.cuda.is_current_stream_capturing():
+            if not torch.xpu.is_current_stream_capturing():
                 # cuStreamWriteValue32 issues a system level fence before the write
                 _SymmetricMemory.stream_write_value32(A_signals, src_rank, 1)
             else:
@@ -772,9 +773,9 @@ def _should_use_multimem_all_gather_matmul(
     group = c10d._resolve_process_group(group_name)
     local_M = math.prod(A_shard.shape[:-1])
     has_multicast_support = (
-        A_shard.device.type == "cuda"
+        A_shard.device.type == "xpu"
         and _SymmetricMemory.has_multicast_support(
-            DeviceType.CUDA, A_shard.device.index
+            DeviceType.XPU, A_shard.device.index
         )
     )
 
@@ -879,6 +880,7 @@ def _fused_all_gather_scaled_matmul_fallback(
 
 
 @torch.library.impl(lib, "fused_all_gather_scaled_matmul", "CUDA")
+@torch.library.impl(lib, "fused_all_gather_scaled_matmul", "XPU")
 def _fused_all_gather_scaled_matmul(
     A_shard: torch.Tensor,
     Bs: list[torch.Tensor],
@@ -986,6 +988,7 @@ def restride_A_shard_for_fused_all_gather_matmul(
 
 
 @torch.library.impl(lib, "fused_matmul_reduce_scatter", "CUDA")
+@torch.library.impl(lib, "fused_matmul_reduce_scatter", "XPU")
 def _fused_matmul_reduce_scatter(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -1091,6 +1094,7 @@ def _fused_matmul_reduce_scatter_impl(
 
 
 @torch.library.impl(lib, "fused_scaled_matmul_reduce_scatter", "CUDA")
+@torch.library.impl(lib, "fused_scaled_matmul_reduce_scatter", "XPU")
 def _fused_scaled_matmul_reduce_scatter(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -1384,7 +1388,7 @@ def _maybe_convert_scalar_types_to_dtypes(
 class Work(_Work):
     def __init__(self) -> None:
         super().__init__()
-        self.event = torch.cuda.Event()
+        self.event = torch.xpu.Event()
         self.event.record()
 
     def wait(self, timeout: timedelta = timedelta(seconds=0)) -> bool:
@@ -1431,6 +1435,7 @@ def _low_contention_all_gather_meta(
 
 
 @torch.library.impl(lib, "_low_contention_all_gather", "CUDA")
+@torch.library.impl(lib, "_low_contention_all_gather", "XPU")
 def _low_contention_all_gather(
     tensor: torch.Tensor,
     group_name: str,
@@ -1462,7 +1467,7 @@ def _low_contention_all_gather(
     output = tensor.new_empty(tensor.shape[0] * world_size, *tensor.shape[1:])
     chunks = output.chunk(world_size)
 
-    _get_backend_stream().wait_stream(torch.cuda.current_stream())
+    _get_backend_stream().wait_stream(torch.xpu.current_stream())
     with _get_backend_stream():
         if not input_is_symm_mem:
             local_buf = symm_mem.get_buffer(rank, tensor.shape, tensor.dtype)
@@ -1500,7 +1505,7 @@ def _low_contention_reduce_scatter_with_symm_mem_input(
     a2a_res = torch.empty_like(tensor)
     chunks = a2a_res.chunk(world_size)
 
-    _get_backend_stream().wait_stream(torch.cuda.current_stream())
+    _get_backend_stream().wait_stream(torch.xpu.current_stream())
     with _get_backend_stream():
         # pull + offline reduction
         symm_mem.barrier()
@@ -1537,7 +1542,7 @@ def _low_contention_reduce_scatter_with_workspace(
     assert tensor.shape[0] % world_size == 0
     chunks = tensor.chunk(world_size)
 
-    _get_backend_stream().wait_stream(torch.cuda.current_stream())
+    _get_backend_stream().wait_stream(torch.xpu.current_stream())
     with _get_backend_stream():
         # push + offline reduction
         workspace.barrier()
@@ -1562,6 +1567,7 @@ def _low_contention_reduce_scatter_with_workspace(
 
 
 @torch.library.impl(lib, "_low_contention_reduce_scatter", "CUDA")
+@torch.library.impl(lib, "_low_contention_reduce_scatter", "XPU")
 def _low_contention_reduce_scatter(
     tensor: torch.Tensor,
     reduce_op: str,
