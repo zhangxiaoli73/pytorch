@@ -776,7 +776,7 @@ def _post_backward_hook(
             _no_dispatch_record_stream(
                 autograd_computed_grad, state._post_backward_stream
             )
-            print("zl_debug post backward done")
+            # print("zl_debug post backward done")
 
 def _post_backward_reshard_only_hook(
     state: _FSDPState,
@@ -1024,7 +1024,7 @@ def _post_backward_use_sharded_grad_views(handle: FlatParamHandle):
     # of immediately after resharding
     handle._use_sharded_grad_views()
     if handle._has_optim_in_backward:
-        print("zl_debug in _post_backward_use_sharded_grad_views")
+        # print("zl_debug in _post_backward_use_sharded_grad_views")
         handle.prepare_gradient_for_optim()
         for orig_param in handle.flat_param._params:
             # Check for `None` gradient to filter parameters not in the rank
@@ -1219,7 +1219,7 @@ def _finalize_params(
             # sharded gradient from the last synchronized iteration
             return
         if not handle._has_optim_in_backward:
-            print("zl_debug _finalize_params")
+            # print("zl_debug _finalize_params")
             handle.prepare_gradient_for_optim()
         _p_assert(
             hasattr(flat_param, "_post_backward_called"),

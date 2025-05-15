@@ -1550,7 +1550,7 @@ class FlatParamHandle:
             sharded_grad = torch.zeros(flat_param._sharded_size, device=self.device)  # type: ignore[attr-defined]
         else:
             self._check_sharded(flat_param.grad)
-            print("zl_debug in unshard_grad: assign flat_param.grad to flat_param._saved_grad_shard")
+            #print("zl_debug in unshard_grad: assign flat_param.grad to flat_param._saved_grad_shard")
             flat_param._saved_grad_shard = flat_param.grad  # type: ignore[attr-defined]
             sharded_grad = flat_param._saved_grad_shard  # type: ignore[attr-defined]
         padded_unsharded_grad = torch.empty(
@@ -1669,7 +1669,7 @@ class FlatParamHandle:
             # If no sharded gradient was computed this iteration, then there is
             # no need to forward `_saved_grad_shard` to `grad`
             if flat_param._post_backward_called:  # type: ignore[attr-defined]
-                print("zl_debug put flat_param._saved_grad_shard to flat_param.grad")
+                #print("zl_debug put flat_param._saved_grad_shard to flat_param.grad")
                 flat_param.grad = flat_param._saved_grad_shard  # type: ignore[attr-defined]
                 if flat_param.grad is not None:
                     cast_grad_to_param_dtype_if_needed(flat_param)
@@ -2533,7 +2533,7 @@ class FlatParamHandle:
         elif hasattr(flat_param, "_saved_grad_shard"):
             # In the post-backward hook, the sharded gradient is still in
             # `_saved_grad_shard`.
-            print("zl_debug in sharded_grad with flat_param._saved_grad_shard as return")
+            #print("zl_debug in sharded_grad with flat_param._saved_grad_shard as return")
             grad = flat_param._saved_grad_shard  # type: ignore[attr-defined]
         else:
             # If in IDLE or in FORWARD states, then there may be an
