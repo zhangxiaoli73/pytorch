@@ -47,7 +47,7 @@ class Model(nn.Module):
             nn.AdaptiveAvgPool2d(output_size=(1, 1)),
             nn.Flatten(),
         )
-        self.device = torch.cuda.current_device()
+        self.device = torch.xpu.current_device()
         self.head = nn.Linear(64, 10)
         if with_fsdp and freeze_after_wrap_fsdp:
             self.fsdp_wrap(fsdp_kwargs)
@@ -145,7 +145,7 @@ class TestFreezingWeights(FSDPTest):
         forward_prefetch,
     ):
         torch.manual_seed(0)
-        batch = torch.randn(size=(2, 3, 224, 224)).cuda()
+        batch = torch.randn(size=(2, 3, 224, 224)).xpu()
 
         fsdp_kwargs = {
             "device_id": self.rank,
@@ -164,7 +164,7 @@ class TestFreezingWeights(FSDPTest):
             disable_autograd,
             fsdp_kwargs,
         )
-        model = model.cuda()
+        model = model.xpu()
 
         # freezing the trunk using requires_grad.
         if freezing_method == FreezingMethod.RequiresGrad:
@@ -178,7 +178,7 @@ class TestFreezingWeights(FSDPTest):
         else:
             model = DistributedDataParallel(model, **ddp_kwargs)
 
-        target = torch.tensor([0, 1], dtype=torch.long).cuda()
+        target = torch.tensor([0, 1], dtype=torch.long).xpu()
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
 
