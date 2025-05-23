@@ -40,6 +40,8 @@ from torch.distributed.utils import (
 from torch.utils import _pytree as pytree
 
 global_grad = {}
+global_grad_output = {}
+global_count_output = {}
 global_count = 0
 
 logger = logging.getLogger(__name__)
@@ -261,10 +263,10 @@ def _init_streams(
     state._unshard_stream = state._device_handle.Stream(priority=high_priority)
     # Stream for overlapping gradient reduction with the backward pass gradient
     # computation
-    state._post_backward_stream = state._device_handle.Stream(priority=high_priority)
+    state._post_backward_stream = state._device_handle.current_stream() #state._device_handle.Stream(priority=high_priority)
     # Stream for pre-unshard logic, namely allocations and writes for CPU
     # offloading (H2D copy) and mixed precision (low precision cast)
-    state._pre_unshard_stream = state._device_handle.Stream(priority=high_priority)
+    state._pre_unshard_stream = state._device_handle.current_stream() #state._device_handle.Stream(priority=high_priority)
     # Stream to run HSDP's all-reduce as async (if using HSDP)
     state._all_reduce_stream = (
         state._device_handle.Stream() if uses_hybrid_sharding else state._default_stream
@@ -647,6 +649,12 @@ def _pre_backward_hook(
         and handle._ran_pre_backward_hook
     ):
         return grad
+
+    global global_grad_output
+    global global_count_output
+    key = type(module).__name__ + str(global_count_output)
+    global_grad_output[key] = grad.clone()
+    global_count_output = global_count_output + 1
 
     with torch.profiler.record_function("FullyShardedDataParallel._pre_backward_hook"):
         # Queue the post-backward callback once for the root FSDP instance to
