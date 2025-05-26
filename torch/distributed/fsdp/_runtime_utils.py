@@ -41,7 +41,7 @@ from torch.utils import _pytree as pytree
 
 global_grad = {}
 global_grad_output = {}
-global_count_output = {}
+global_count_output = 0
 global_count = 0
 
 logger = logging.getLogger(__name__)
@@ -381,21 +381,6 @@ def _pre_forward(
         # their gradients. They must be re-registered every forward pass in case
         # the `grad_fn` is mutated.
         _register_post_backward_hook(state, handle)
-        # We have to reallocate the _cpu_grad if optimizer overlap
-        # set the grad to None in the backward pass.
-        if handle and handle._offload_params and handle.flat_param._cpu_grad is None:
-            handle.flat_param._cpu_grad = torch.zeros_like(
-                handle.flat_param._local_shard, device=torch.device("cpu")
-            ).pin_memory()
-
-        should_cast_forward_inputs = (
-            state._handle and not state._handle._force_full_precision
-        )
-
-        if should_cast_forward_inputs and state.mixed_precision.cast_forward_inputs:
-            # Recursively convert args and kwargs to specified precision.
-            input_dtype: Optional[torch.dtype] = state.mixed_precision.param_dtype
-            args, kwargs = _cast_forward_inputs(input_dtype, *args, **kwargs)
         _register_post_backward_reshard_only_hook(state, handle, args, kwargs)
         return args, kwargs
 
@@ -416,11 +401,7 @@ def _pre_forward_unshard(
     # Don't wait during trace
     if not torch.distributed._functional_collectives.is_torchdynamo_compiling():
         current_stream = state._device_handle.current_stream()
-        if state._unshard_event is not None:
-            current_stream.wait_event(state._unshard_event)
-            state._unshard_event = None
-        else:
-            current_stream.wait_stream(state._unshard_stream)
+        current_stream.wait_stream(state._unshard_stream)
     with torch.profiler.record_function(
         "FullyShardedDataParallel._pre_forward_prefetch"
     ):
@@ -750,13 +731,6 @@ def _post_backward_hook(
                 handle._use_unsharded_grad_views()
             return
 
-        # Wait for all ops in the current stream (e.g. gradient computation) to
-        # finish before reduce-scattering the gradient
-        if not torch.distributed._functional_collectives.is_torchdynamo_compiling():
-            state._post_backward_stream.wait_stream(
-                state._device_handle.current_stream()
-            )
-
         with state._device_handle.stream(state._post_backward_stream):
             autograd_computed_grad = flat_param.grad.data
             if (
@@ -883,22 +857,6 @@ def _reduce_grad(state: _FSDPState, handle: FlatParamHandle) -> None:
         key3 = "new_sharded_grad_after_reducescatter" + str(global_count)
         global_grad[key3] = new_sharded_grad.clone()
         global_count += 1
-        if uses_hybrid_sharded_strategy:
-            # Don't wait during trace
-            if not torch.distributed._functional_collectives.is_torchdynamo_compiling():
-                state._all_reduce_stream.wait_stream(state._post_backward_stream)
-            with state._device_handle.stream(state._all_reduce_stream):
-                # Since the new sharded gradient is produced in the post-
-                # backward stream and consumed in the all-reduce stream,
-                # inform the caching allocator
-                _no_dispatch_record_stream(new_sharded_grad, state._all_reduce_stream)
-                dist.all_reduce(new_sharded_grad, group=state._inter_node_pg)
-                _div_if_needed(new_sharded_grad, state._gradient_postdivide_factor)
-                grad_to_offload = _accumulate_sharded_grad(
-                    state, handle, new_sharded_grad
-                )
-                _post_reduce_grad_callback(state, handle, grad_to_offload)
-                return
         _div_if_needed(new_sharded_grad, state._gradient_postdivide_factor)
     else:
         state._comm_hook(
@@ -1011,6 +969,7 @@ def _offload_grad(
     # Since the gradient being offloaded may have been produced in the
     # computation stream and is being consumed here in the post-backward
     # stream, inform the caching allocator
+    # zl_debug: never to call
     _no_dispatch_record_stream(grad_to_offload.data, state._post_backward_stream)
 
 
@@ -1075,6 +1034,7 @@ def _cast_grad_to_param_dtype(
         # caching allocator; for the sharded strategies, the gradient is
         # produced in the post-backward stream, so this `record_stream()`
         # should be a no-op
+        # zl_debug: never to call
         _no_dispatch_record_stream(
             low_prec_grad_data, state._device_handle.current_stream()
         )
@@ -1332,6 +1292,7 @@ def _register_pre_forward_hook(
     """
     Registers a pre-forward hook on ``module``.
     """
+    # zl_debug: never to call
     for forward_handle in state._pre_forward_handles:
         forward_handle.remove()
     state._pre_forward_handles.clear()
