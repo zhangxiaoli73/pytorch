@@ -1217,25 +1217,6 @@ class FlatParamHandle:
         else:
             self._check_on_compute_device(self.flat_param)
         flat_param._local_shard = flat_param.data
-        if self._offload_params:
-            # Pin the memory for faster H2D transfer
-            flat_param._local_shard = flat_param._local_shard.pin_memory()
-            # Pre-allocate the sharded gradient on CPU to enable non-blocking
-            # D2H transfer during the backward pass
-            flat_param._cpu_grad = torch.zeros_like(
-                flat_param._local_shard, device=cpu_device
-            ).pin_memory()
-        if self._uses_param_mixed_precision:
-            # For parameter mixed precision, we maintain a low precision
-            # sharded tensor on the compute device to be all-gathered (for
-            # sharded strategies) or directly used (for `NO_SHARD`) for
-            # computation.
-            flat_param._mp_shard = torch.empty_like(
-                flat_param._local_shard,
-                device=self.device,
-                dtype=self._fwd_bwd_param_dtype,
-            )
-            _free_storage(flat_param._mp_shard)
         if self.uses_sharded_strategy:
             # We maintain a padded unsharded tensor that serves as the
             # all-gather destination and owns the original parameter storages.
@@ -1253,15 +1234,6 @@ class FlatParamHandle:
             flat_param._padded_unsharded_size = flat_param._full_param_padded.size()
             _free_storage(flat_param._full_param_padded)
 
-            if self._uses_param_mixed_precision:
-                # For parameter mixed precision, we maintain a full precision
-                # padded unsharded tensor for when we force full precision.
-                flat_param._full_prec_full_param_padded = torch.empty(
-                    padded_unsharded_numel,
-                    device=self.device,
-                    dtype=flat_param.dtype,  # full precision
-                )
-                _free_storage(flat_param._full_prec_full_param_padded)
 
     ###################
     # UNSHARD/RESHARD #
@@ -1338,6 +1310,7 @@ class FlatParamHandle:
                 if self.uses_sharded_strategy
                 else self.flat_param
             )
+            print("zl_debug no need to unshard")
             self._use_unsharded_flat_param(unsharded_flat_param)
             return
         unsharded_flat_param = self._alloc_padded_unsharded_flat_param()
@@ -1378,25 +1351,7 @@ class FlatParamHandle:
         """
         self._check_sharded_strategy()
         flat_param = self.flat_param
-        if self._force_full_precision and self._uses_param_mixed_precision:
-            # When parameter mixed precision is enabled, we use a different
-            # tensor as the all-gather destination to preserve the invariant
-            # that  `_full_param_padded` is in the low precision
-            unsharded_flat_param = flat_param._full_prec_full_param_padded  # type: ignore[attr-defined]
-            _p_assert(
-                unsharded_flat_param.dtype != self._fwd_bwd_param_dtype,
-                f"Expects full precision but got {self._fwd_bwd_param_dtype}",
-            )
-            # For no-reshard-after-forward strategies, `_full_param_padded` may
-            # still be allocated from a previous forward. As we are forcing
-            # full precision here, the full-precision unsharded copy may be
-            # modified, invalidating the existing low-precision unsharded copy,
-            # so we should free it here to ensure a new all-gather for the next
-            # forward/backward computation to persist the modifications.
-            if flat_param._full_param_padded.untyped_storage().size() > 0:
-                _free_storage(flat_param._full_param_padded)
-        else:
-            unsharded_flat_param = flat_param._full_param_padded  # type: ignore[attr-defined]
+        unsharded_flat_param = flat_param._full_param_padded  # type: ignore[attr-defined]
         return unsharded_flat_param
 
     def _all_gather_flat_param(
@@ -1790,51 +1745,7 @@ class FlatParamHandle:
     def _use_sharded_flat_param(self) -> None:
         """Switches to using the sharded flat parameter."""
         flat_param = self.flat_param
-        if self._use_orig_params:
-            in_forward = self._training_state == HandleTrainingState.FORWARD
-            skip_use_sharded_views = (
-                torch.is_grad_enabled()
-                and in_forward
-                and self._sharding_strategy
-                in NO_RESHARD_AFTER_FORWARD_HANDLE_STRATEGIES
-            )
-            # Only incur the extra `.data` call if needed
-            if skip_use_sharded_views:
-                unsharded_flat_param = flat_param.data
-        if self._offload_params:
-            device = flat_param._local_shard.device  # type: ignore[attr-defined]
-            _p_assert(
-                device == torch.device("cpu"),
-                f"Expects the local shard to be on CPU but got {device}",
-            )
         flat_param.data = flat_param._local_shard  # type: ignore[attr-defined]
-        if self._use_orig_params:
-            if skip_use_sharded_views:  # type: ignore[possibly-undefined]
-                self._unsharded_flat_param_for_skipped_views = unsharded_flat_param  # type: ignore[possibly-undefined]
-            else:
-                self._use_sharded_views()
-            # For the post-forward reshard, we may try to use sharded gradient
-            # views (or unsharded gradient views if a gradient was accumulated
-            # in `no_sync()`), but for the post-backward reshard, we delay the
-            # call to after the reduce-scatter.
-            if (
-                in_forward  # type: ignore[possibly-undefined]
-                # Skip using gradient views if skipped using sharded views
-                # since exposing unsharded parameters with sharded gradients
-                # may be confusing to the user
-                and not self._skipped_use_sharded_views
-            ):
-                # TODO: Change `_unpadded_unsharded_size` if we change the
-                # gradient to be computed directly with padding.
-                accumulated_grad_in_no_sync = (
-                    flat_param.grad is not None
-                    and self.uses_sharded_strategy
-                    and flat_param.grad.shape == flat_param._unpadded_unsharded_size
-                )
-                if accumulated_grad_in_no_sync:
-                    self._use_unsharded_grad_views()
-                else:
-                    self._use_sharded_grad_views()
 
     #########
     # VIEWS #

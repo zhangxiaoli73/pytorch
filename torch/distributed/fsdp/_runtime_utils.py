@@ -290,17 +290,10 @@ def _unshard(
     """
     if not handle:
         return
-    with state._device_handle.stream(pre_unshard_stream):
-        ran_pre_unshard = handle.pre_unshard()
-    if ran_pre_unshard:
-        unshard_stream.wait_stream(pre_unshard_stream)
-    if state.limit_all_gathers:
-        event = state._free_event_queue.dequeue_if_needed()
-        if event:
-            with torch.profiler.record_function(
-                "FullyShardedDataParallel.rate_limiter"
-            ):
-                event.synchronize()
+    # with state._device_handle.stream(pre_unshard_stream):
+    #     ran_pre_unshard = handle.pre_unshard()
+    # if ran_pre_unshard:
+    #     unshard_stream.wait_stream(pre_unshard_stream)
     with state._device_handle.stream(unshard_stream):
         handle.unshard()
         handle.post_unshard()
