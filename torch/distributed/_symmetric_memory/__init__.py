@@ -1467,7 +1467,7 @@ def _low_contention_all_gather(
     output = tensor.new_empty(tensor.shape[0] * world_size, *tensor.shape[1:])
     chunks = output.chunk(world_size)
 
-    _get_backend_stream().wait_stream(torch.xpu.current_stream())
+    _get_backend_stream().wait_stream(torch.accelerator.current_stream())
     with _get_backend_stream():
         if not input_is_symm_mem:
             local_buf = symm_mem.get_buffer(rank, tensor.shape, tensor.dtype)
@@ -1505,7 +1505,7 @@ def _low_contention_reduce_scatter_with_symm_mem_input(
     a2a_res = torch.empty_like(tensor)
     chunks = a2a_res.chunk(world_size)
 
-    _get_backend_stream().wait_stream(torch.xpu.current_stream())
+    _get_backend_stream().wait_stream(torch.accelerator.current_stream())
     with _get_backend_stream():
         # pull + offline reduction
         symm_mem.barrier()
@@ -1542,7 +1542,7 @@ def _low_contention_reduce_scatter_with_workspace(
     assert tensor.shape[0] % world_size == 0
     chunks = tensor.chunk(world_size)
 
-    _get_backend_stream().wait_stream(torch.xpu.current_stream())
+    _get_backend_stream().wait_stream(torch.accelerator.current_stream())
     with _get_backend_stream():
         # push + offline reduction
         workspace.barrier()
