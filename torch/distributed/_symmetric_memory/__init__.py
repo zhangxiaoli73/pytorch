@@ -98,7 +98,7 @@ def get_symm_mem_workspace(group_name: str, min_size: int) -> _SymmetricMemory:
     tensor = _group_name_to_workspace_tensor.get(group_name)
     size = tensor.numel() * tensor.element_size() if tensor is not None else 0
     if tensor is None or size < min_size:
-        if torch.cuda.is_current_stream_capturing():
+        if False: #torch.cuda.is_current_stream_capturing():
             curr_size = 0 if tensor is None else tensor.numel() * tensor.element_size()
             raise RuntimeError(
                 f"get_symm_mem_workspace(): the requested size ({min_size} bytes) "
@@ -113,19 +113,19 @@ def get_symm_mem_workspace(group_name: str, min_size: int) -> _SymmetricMemory:
             (max(size, min_size),),
             [1],
             torch.uint8,
-            torch.device(f"cuda:{torch.cuda.current_device()}"),
+            torch.device(f"xpu:{torch.xpu.current_device()}"),
             group_name,
         )
         _group_name_to_workspace_tensor[group_name] = tensor
     return _SymmetricMemory.rendezvous(tensor)
 
 
-_backend_streams: dict[int, torch.cuda.Stream] = {}
+_backend_streams: dict[int, torch.xpu.Stream] = {}
 
 
-def _get_backend_stream(priority: int = 0) -> torch.cuda.Stream:
+def _get_backend_stream(priority: int = 0) -> torch.xpu.Stream:
     if priority not in _backend_streams:
-        _backend_streams[priority] = torch.cuda.Stream(priority=priority)
+        _backend_streams[priority] = torch.xpu.Stream(priority=priority)
     return _backend_streams[priority]
 
 
@@ -157,12 +157,13 @@ def _pipelined_multi_all_gather_and_consume(
     for x in shard:
         p2p_workspace_size_req += x.numel() * x.element_size()
     symm_mem = get_symm_mem_workspace(group_name, min_size=p2p_workspace_size_req)
+    print("[Python] zl_debug: finished to get symm memory with size {min_size}")
     group_size = symm_mem.world_size
     rank = symm_mem.rank
 
     symm_mem.barrier(channel=0)
     backend_stream = _get_backend_stream()
-    backend_stream.wait_stream(torch.cuda.current_stream())
+    backend_stream.wait_stream(torch.xpu.current_stream())
 
     for x, y in zip(shard, ag_out):
         assert x.is_contiguous(), (
@@ -193,7 +194,7 @@ def _pipelined_multi_all_gather_and_consume(
             bufs.append(buf)
             offset_bytes += buf.numel() * buf.element_size()
         return bufs
-
+    # zl_debug: get local p2p buffer
     local_p2p_bufs = get_p2p_bufs(rank)
 
     # shards[i] => shard from rank i
@@ -242,8 +243,10 @@ def _pipelined_multi_all_gather_and_consume(
     # prevent suboptimal scenarios, we are giving up the chance to overlap "mv"
     # and "b" with the first shard_consumer for now.
     copy_shard(dst=local_p2p_bufs, src=shard)
+    torch.xpu.synchronize()
+    print(f"[Python] zl_debug copy shard tensor to local done {local_p2p_bufs}")
     symm_mem.barrier(channel=1)
-    backend_stream.wait_stream(torch.cuda.current_stream())
+    backend_stream.wait_stream(torch.xpu.current_stream())
 
     # At this point, all ranks have copied their local shard to
     # their local p2p buffer. Each rank can now copy and consume
@@ -252,11 +255,13 @@ def _pipelined_multi_all_gather_and_consume(
 
     for step in range(1, group_size):
         if step % 2 == 0:
-            stream = torch.cuda.current_stream()
+            stream = torch.xpu.current_stream()
         else:
             stream = backend_stream
         remote_rank = (step + rank) % group_size
         remote_p2p_bufs = get_p2p_bufs(remote_rank)
+        print(f"[Python] zl_debug remote_rank={remote_rank} remote_tensor ptr={remote_p2p_bufs[0].data_ptr()}")
+        # zl_debug try to copy remote to local
         with stream:
             copy_shard(dst=shards[remote_rank], src=remote_p2p_bufs)
             shard_consumer(shards[remote_rank], remote_rank)
@@ -265,13 +270,13 @@ def _pipelined_multi_all_gather_and_consume(
         # Copy from input to the all-gather output. Opportunistically overlap
         # it with the last shard_consumer.
         if group_size % 2 == 0:
-            stream = torch.cuda.current_stream()
+            stream = torch.xpu.current_stream()
         else:
             stream = backend_stream
         with stream:
             copy_shard(dst=shards[rank], src=shard)
 
-    torch.cuda.current_stream().wait_stream(backend_stream)
+    torch.xpu.current_stream().wait_stream(backend_stream)
     symm_mem.barrier(channel=0)
 
 
@@ -327,7 +332,7 @@ def _pipelined_produce_and_all2all(
 
     symm_mem.barrier(channel=0)
     backend_stream = _get_backend_stream()
-    backend_stream.wait_stream(torch.cuda.current_stream())
+    backend_stream.wait_stream(torch.xpu.current_stream())
 
     def get_p2p_buf(rank: int, idx: int) -> torch.Tensor:
         assert idx in (0, 1)
@@ -345,7 +350,7 @@ def _pipelined_produce_and_all2all(
     for step in range(1, group_size):
         remote_rank = (rank - step) % group_size
         if step % 2 == 0:
-            stream = torch.cuda.current_stream()
+            stream = torch.xpu.current_stream()
             p2p_buf = local_p2p_buf_1
             remote_p2p_buf = get_p2p_buf(remote_rank, 1)
         else:
@@ -401,7 +406,7 @@ def _pipelined_produce_and_all2all(
             # the correct order, there's very little room for the scheduling
             # order of subsequent kernels to be inconsistent across ranks.
             if step == 2:
-                torch.cuda._sleep(100)
+                torch.xpu._sleep(100)
             chunk_producer((rank + step) % group_size, p2p_buf)
             symm_mem.barrier(channel=step % 2)
             out_chunks[remote_rank].copy_(remote_p2p_buf)
@@ -411,10 +416,10 @@ def _pipelined_produce_and_all2all(
 
     # If the sleep wasn't issued in the above loop, do it now.
     if group_size == 2:
-        torch.cuda._sleep(100)
+        torch.xpu._sleep(100)
 
     chunk_producer(rank, out_chunks[rank])
-    torch.cuda.current_stream().wait_stream(backend_stream)
+    torch.xpu.current_stream().wait_stream(backend_stream)
     symm_mem.barrier(channel=0)
 
 
@@ -539,74 +544,20 @@ def _fused_all_gather_matmul_impl(
         shard=A_shard, scale=A_scale, gather_dim=gather_dim, group_size=group.size()
     )
 
-    # Computing block-wise matmul along the first dim of A
-    if scale_mode == _ScaleMode.ROW_WISE_SHARDED:
-        assert A_scale is not None
-        A_scale_shard = A_scale.movedim(gather_dim, 0).flatten(0, -2)
-        A_scale_flat = A_scale_shard.new_empty(
-            A_scale_shard.shape[0] * group.size(),
-            A_scale_shard.shape[1],
-        )
 
-        def row_wise_sharded_consumer(shard: list[torch.Tensor], rank: int) -> None:
-            for idx, (B, kwargs) in enumerate(zip(Bs, kwargs_list)):
-                mm_out_op(
-                    shard[0],
-                    B,
-                    scale_a=shard[1],
-                    **kwargs,
-                    out=output_shards[idx][rank],
-                )
+    assert scale_mode == _ScaleMode.UNSCALED
 
-        _pipelined_multi_all_gather_and_consume(
-            [A_shard_flat, A_scale_shard],
-            row_wise_sharded_consumer,
-            [A_flat, A_scale_flat],
-            group_name,
-            return_A,
-        )
-    elif scale_mode == _ScaleMode.ROW_WISE_REPLICATED:
-        assert A_scale is not None
-        A_scale_shards = (
-            A_scale.movedim(gather_dim, 0).flatten(0, -2).chunk(group.size())
-        )
+    def default_consumer(shard: torch.Tensor, rank: int) -> None:
+        for idx, (B, kwargs) in enumerate(zip(Bs, kwargs_list)):
+            mm_out_op(shard, B, **kwargs, out=output_shards[idx][rank])
 
-        def row_wise_replicated_consumer(shard: torch.Tensor, rank: int) -> None:
-            for idx, (B, kwargs) in enumerate(zip(Bs, kwargs_list)):
-                mm_out_op(
-                    shard,
-                    B,
-                    scale_a=A_scale_shards[rank],
-                    **kwargs,
-                    out=output_shards[idx][rank],
-                )
-
-        _pipelined_all_gather_and_consume(
-            A_shard_flat,
-            row_wise_replicated_consumer,
-            A_flat,
-            group_name,
-            return_A,
-        )
-    else:
-        if scale_mode == _ScaleMode.TENSOR_WISE:
-            assert A_scale is not None
-            for kwargs in kwargs_list:
-                kwargs["scale_a"] = A_scale
-        else:
-            assert scale_mode == _ScaleMode.UNSCALED
-
-        def default_consumer(shard: torch.Tensor, rank: int) -> None:
-            for idx, (B, kwargs) in enumerate(zip(Bs, kwargs_list)):
-                mm_out_op(shard, B, **kwargs, out=output_shards[idx][rank])
-
-        _pipelined_all_gather_and_consume(
-            A_shard_flat,
-            default_consumer,
-            A_flat,
-            group_name,
-            return_A,
-        )
+    _pipelined_all_gather_and_consume(
+        A_shard_flat,
+        default_consumer,
+        A_flat,
+        group_name,
+        return_A,
+    )
 
     A = unflatten(A_flat) if return_A else None
     return A, [unflatten(output) for output in outputs]
@@ -635,6 +586,7 @@ def _fused_all_gather_matmul_fallback(
 
 
 @torch.library.impl(lib, "fused_all_gather_matmul", "CUDA")
+@torch.library.impl(lib, "fused_all_gather_matmul", "XPU")
 def _fused_all_gather_matmul(
     A_shard: torch.Tensor,
     Bs: list[torch.Tensor],
@@ -653,25 +605,6 @@ def _fused_all_gather_matmul(
     contiguous, no extra copy is required for input layout transformation.
     Otherwise A_shard needs to be copied once.
     """
-    if _is_test_mode:
-        return _fused_all_gather_matmul_fallback(
-            A_shard, Bs, gather_dim, group_name, return_A=return_A
-        )
-
-    if _should_use_fused_all_gather_matmul_native(A_shard, Bs, gather_dim, group_name):
-        group = c10d._resolve_process_group(group_name)
-        leading_dims = list(A_shard.shape[:-1])
-        leading_dims[0] *= group.size()
-        A, out = _fused_all_gather_matmul_native(
-            A_shard.flatten(0, -2), Bs[0], group_name
-        )
-        return A.view(*leading_dims, -1), [out.view(*leading_dims, -1)]
-
-    if _should_use_multimem_all_gather_matmul(
-        A_shard, gather_dim, group_name, return_A
-    ):
-        return None, _multimem_all_gather_matmul(A_shard, Bs, group_name)
-
     with torch.profiler.record_function("fused_all_gather_matmul"):
         return _fused_all_gather_matmul_impl(
             torch.ops.aten.mm.out,
@@ -727,7 +660,7 @@ def _fused_all_gather_matmul_native(
     rank = symm_mem.rank
     world_size = symm_mem.world_size
 
-    current_stream = torch.cuda.current_stream()
+    current_stream = torch.xpu.current_stream()
     backend_stream = _get_backend_stream(priority=-1)
 
     symm_mem.barrier()
@@ -739,7 +672,7 @@ def _fused_all_gather_matmul_native(
     A_shards = A.chunk(world_size)
 
     A_shards[rank].copy_(A_shard)
-    if not torch.cuda.is_current_stream_capturing():
+    if True: #not torch.cuda.is_current_stream_capturing():
         _SymmetricMemory.stream_write_value32(A_signals, rank, 1)
     else:
         _SymmetricMemory.memset32(A_signals, offset=rank, val=1, count=1)
@@ -750,7 +683,7 @@ def _fused_all_gather_matmul_native(
         src_buf = symm_mem.get_buffer(src_rank, A_shard.shape, A_shard.dtype)
         with backend_stream:
             A_shards[src_rank].copy_(src_buf)
-            if not torch.cuda.is_current_stream_capturing():
+            if True: #not torch.cuda.is_current_stream_capturing():
                 # cuStreamWriteValue32 issues a system level fence before the write
                 _SymmetricMemory.stream_write_value32(A_signals, src_rank, 1)
             else:
@@ -1384,7 +1317,7 @@ def _maybe_convert_scalar_types_to_dtypes(
 class Work(_Work):
     def __init__(self) -> None:
         super().__init__()
-        self.event = torch.cuda.Event()
+        self.event = torch.xpu.Event()
         self.event.record()
 
     def wait(self, timeout: timedelta = timedelta(seconds=0)) -> bool:
