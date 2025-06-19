@@ -68,6 +68,7 @@ class TORCH_API SymmetricMemory : public c10::intrusive_ptr_target {
   virtual void barrier(int channel, size_t timeout_ms) = 0;
   virtual void put_signal(int dst_rank, int channel, size_t timeout_ms) = 0;
   virtual void wait_signal(int src_rank, int channel, size_t timeout_ms) = 0;
+  virtual void copy_buffer(at::Tensor src, at::Tensor dst , size_t size) = 0;
 
   virtual int get_rank() = 0;
   virtual int get_world_size() = 0;

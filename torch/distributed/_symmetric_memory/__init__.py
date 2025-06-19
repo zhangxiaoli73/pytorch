@@ -157,7 +157,7 @@ def _pipelined_multi_all_gather_and_consume(
     for x in shard:
         p2p_workspace_size_req += x.numel() * x.element_size()
     symm_mem = get_symm_mem_workspace(group_name, min_size=p2p_workspace_size_req)
-    print("[Python] zl_debug: finished to get symm memory with size {min_size}")
+    #print(f"[Python] zl_debug: finished to get symm memory with size {min_size}", flush=True)
     group_size = symm_mem.world_size
     rank = symm_mem.rank
 
@@ -179,7 +179,8 @@ def _pipelined_multi_all_gather_and_consume(
 
     def copy_shard(dst: list[torch.Tensor], src: list[torch.Tensor]) -> None:
         for d, s in zip(dst, src):
-            d.copy_(s)
+            symm.copy_buffer(s, d, src.numel())
+            # d.copy_(s)
 
     def get_p2p_bufs(remote_rank: int) -> list[torch.Tensor]:
         offset_bytes = 0
@@ -243,8 +244,8 @@ def _pipelined_multi_all_gather_and_consume(
     # prevent suboptimal scenarios, we are giving up the chance to overlap "mv"
     # and "b" with the first shard_consumer for now.
     copy_shard(dst=local_p2p_bufs, src=shard)
-    torch.xpu.synchronize()
-    print(f"[Python] zl_debug copy shard tensor to local done {local_p2p_bufs}")
+    #torch.xpu.synchronize()
+    #print(f"[Python] zl_debug copy shard tensor to local done {local_p2p_bufs} with shape {local_p2p_bufs.shape}", flush=True)
     symm_mem.barrier(channel=1)
     backend_stream.wait_stream(torch.xpu.current_stream())
 
@@ -260,7 +261,7 @@ def _pipelined_multi_all_gather_and_consume(
             stream = backend_stream
         remote_rank = (step + rank) % group_size
         remote_p2p_bufs = get_p2p_bufs(remote_rank)
-        print(f"[Python] zl_debug remote_rank={remote_rank} remote_tensor ptr={remote_p2p_bufs[0].data_ptr()}")
+        #print(f"[Python] zl_debug remote_rank={remote_rank} remote_tensor ptr={remote_p2p_bufs[0].data_ptr()}", flush=True)
         # zl_debug try to copy remote to local
         with stream:
             copy_shard(dst=shards[remote_rank], src=remote_p2p_bufs)
