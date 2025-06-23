@@ -179,7 +179,7 @@ def _pipelined_multi_all_gather_and_consume(
 
     def copy_shard(dst: list[torch.Tensor], src: list[torch.Tensor]) -> None:
         for d, s in zip(dst, src):
-            symm.copy_buffer(s, d, src.numel())
+            symm_mem.copy_buffer(s, d, s.numel())
             # d.copy_(s)
 
     def get_p2p_bufs(remote_rank: int) -> list[torch.Tensor]:
