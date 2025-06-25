@@ -161,7 +161,8 @@ def _pipelined_multi_all_gather_and_consume(
     group_size = symm_mem.world_size
     rank = symm_mem.rank
 
-    symm_mem.barrier(channel=0)
+    # symm_mem.barrier(channel=0)
+    dist.barrier()
     backend_stream = _get_backend_stream()
     backend_stream.wait_stream(torch.xpu.current_stream())
 
@@ -246,7 +247,8 @@ def _pipelined_multi_all_gather_and_consume(
     copy_shard(dst=local_p2p_bufs, src=shard)
     #torch.xpu.synchronize()
     #print(f"[Python] zl_debug copy shard tensor to local done {local_p2p_bufs} with shape {local_p2p_bufs.shape}", flush=True)
-    symm_mem.barrier(channel=1)
+    # symm_mem.barrier(channel=1)
+    dist.barrier()
     backend_stream.wait_stream(torch.xpu.current_stream())
 
     # At this point, all ranks have copied their local shard to
@@ -262,7 +264,6 @@ def _pipelined_multi_all_gather_and_consume(
         remote_rank = (step + rank) % group_size
         remote_p2p_bufs = get_p2p_bufs(remote_rank)
         #print(f"[Python] zl_debug remote_rank={remote_rank} remote_tensor ptr={remote_p2p_bufs[0].data_ptr()}", flush=True)
-        # zl_debug try to copy remote to local
         with stream:
             copy_shard(dst=shards[remote_rank], src=remote_p2p_bufs)
             shard_consumer(shards[remote_rank], remote_rank)
@@ -278,7 +279,8 @@ def _pipelined_multi_all_gather_and_consume(
             copy_shard(dst=shards[rank], src=shard)
 
     torch.xpu.current_stream().wait_stream(backend_stream)
-    symm_mem.barrier(channel=0)
+    # symm_mem.barrier(channel=0)
+    dist.barrier()
 
 
 def _pipelined_all_gather_and_consume(
