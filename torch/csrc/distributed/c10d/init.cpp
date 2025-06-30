@@ -1198,6 +1198,12 @@ This class does not support ``__members__`` property.)");
           py::arg("src_rank"),
           py::arg("channel") = 0,
           py::arg("timeout_ms") = 0)
+      .def(
+        "copy_buffer",
+        &SymmetricMemory::copy_buffer,
+        py::arg("src"),
+        py::arg("dst"),
+        py::arg("size"))
       // Util functions that are often used together with symmetric memory but
       // not necessarily directly on symmetric memory.
       .def_static(
