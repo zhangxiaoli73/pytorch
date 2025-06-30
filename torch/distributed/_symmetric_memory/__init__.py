@@ -10,6 +10,7 @@ from functools import partial
 from typing import Any, Callable, Optional
 
 import torch
+import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 from torch._C._autograd import DeviceType
@@ -98,7 +99,7 @@ def get_symm_mem_workspace(group_name: str, min_size: int) -> _SymmetricMemory:
     tensor = _group_name_to_workspace_tensor.get(group_name)
     size = tensor.numel() * tensor.element_size() if tensor is not None else 0
     if tensor is None or size < min_size:
-        if torch.cuda.is_current_stream_capturing():
+        if False: #torch.cuda.is_current_stream_capturing():
             curr_size = 0 if tensor is None else tensor.numel() * tensor.element_size()
             raise RuntimeError(
                 f"get_symm_mem_workspace(): the requested size ({min_size} bytes) "
@@ -113,19 +114,19 @@ def get_symm_mem_workspace(group_name: str, min_size: int) -> _SymmetricMemory:
             (max(size, min_size),),
             [1],
             torch.uint8,
-            torch.device(f"cuda:{torch.cuda.current_device()}"),
+            torch.device(f"xpu:{torch.xpu.current_device()}"),
             group_name,
         )
         _group_name_to_workspace_tensor[group_name] = tensor
     return _SymmetricMemory.rendezvous(tensor)
 
 
-_backend_streams: dict[int, torch.cuda.Stream] = {}
+_backend_streams: dict[int, torch.xpu.Stream] = {}
 
 
-def _get_backend_stream(priority: int = 0) -> torch.cuda.Stream:
+def _get_backend_stream(priority: int = 0) -> torch.xpu.Stream:
     if priority not in _backend_streams:
-        _backend_streams[priority] = torch.cuda.Stream(priority=priority)
+        _backend_streams[priority] = torch.xpu.Stream(priority=priority)
     return _backend_streams[priority]
 
 
@@ -160,9 +161,10 @@ def _pipelined_multi_all_gather_and_consume(
     group_size = symm_mem.world_size
     rank = symm_mem.rank
 
-    symm_mem.barrier(channel=0)
+    # symm_mem.barrier(channel=0)
+    dist.barrier()
     backend_stream = _get_backend_stream()
-    backend_stream.wait_stream(torch.cuda.current_stream())
+    backend_stream.wait_stream(torch.xpu.current_stream())
 
     for x, y in zip(shard, ag_out):
         assert x.is_contiguous(), (
@@ -178,7 +180,8 @@ def _pipelined_multi_all_gather_and_consume(
 
     def copy_shard(dst: list[torch.Tensor], src: list[torch.Tensor]) -> None:
         for d, s in zip(dst, src):
-            d.copy_(s)
+            symm_mem.copy_buffer(s, d, s.numel())
+            # d.copy_(s)
 
     def get_p2p_bufs(remote_rank: int) -> list[torch.Tensor]:
         offset_bytes = 0
@@ -242,8 +245,11 @@ def _pipelined_multi_all_gather_and_consume(
     # prevent suboptimal scenarios, we are giving up the chance to overlap "mv"
     # and "b" with the first shard_consumer for now.
     copy_shard(dst=local_p2p_bufs, src=shard)
-    symm_mem.barrier(channel=1)
-    backend_stream.wait_stream(torch.cuda.current_stream())
+    #torch.xpu.synchronize()
+    #print(f"[Python] zl_debug copy shard tensor to local done {local_p2p_bufs} with shape {local_p2p_bufs.shape}", flush=True)
+    # symm_mem.barrier(channel=1)
+    dist.barrier()
+    backend_stream.wait_stream(torch.xpu.current_stream())
 
     # At this point, all ranks have copied their local shard to
     # their local p2p buffer. Each rank can now copy and consume
@@ -252,7 +258,7 @@ def _pipelined_multi_all_gather_and_consume(
 
     for step in range(1, group_size):
         if step % 2 == 0:
-            stream = torch.cuda.current_stream()
+            stream = torch.xpu.current_stream()
         else:
             stream = backend_stream
         remote_rank = (step + rank) % group_size
@@ -265,14 +271,15 @@ def _pipelined_multi_all_gather_and_consume(
         # Copy from input to the all-gather output. Opportunistically overlap
         # it with the last shard_consumer.
         if group_size % 2 == 0:
-            stream = torch.cuda.current_stream()
+            stream = torch.xpu.current_stream()
         else:
             stream = backend_stream
         with stream:
             copy_shard(dst=shards[rank], src=shard)
 
-    torch.cuda.current_stream().wait_stream(backend_stream)
-    symm_mem.barrier(channel=0)
+    torch.xpu.current_stream().wait_stream(backend_stream)
+    # symm_mem.barrier(channel=0)
+    dist.barrier()
 
 
 def _pipelined_all_gather_and_consume(
@@ -635,6 +642,7 @@ def _fused_all_gather_matmul_fallback(
 
 
 @torch.library.impl(lib, "fused_all_gather_matmul", "CUDA")
+@torch.library.impl(lib, "fused_all_gather_matmul", "XPU")
 def _fused_all_gather_matmul(
     A_shard: torch.Tensor,
     Bs: list[torch.Tensor],

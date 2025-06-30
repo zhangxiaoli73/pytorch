@@ -758,6 +758,12 @@ class _SymmetricMemory:
         channel: int = 0,
         timeout_ms: int = 0,
     ) -> None: ...
+    def copy_buffer(
+        self,
+        src: torch.Tensor,
+        dst: torch.Tensor,
+        size: int,
+    ) -> None: ...
     @staticmethod
     def memset32(
         tensor: torch.Tensor, offset: int, val: int, count: int = 1
