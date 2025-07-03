@@ -332,9 +332,10 @@ def _pipelined_produce_and_all2all(
     group_size = symm_mem.world_size
     rank = symm_mem.rank
 
-    symm_mem.barrier(channel=0)
+    # symm_mem.barrier(channel=0)
+    dist.barrier()
     backend_stream = _get_backend_stream()
-    backend_stream.wait_stream(torch.cuda.current_stream())
+    backend_stream.wait_stream(torch.xpu.current_stream())
 
     def get_p2p_buf(rank: int, idx: int) -> torch.Tensor:
         assert idx in (0, 1)
@@ -352,7 +353,7 @@ def _pipelined_produce_and_all2all(
     for step in range(1, group_size):
         remote_rank = (rank - step) % group_size
         if step % 2 == 0:
-            stream = torch.cuda.current_stream()
+            stream = torch.xpu.current_stream()
             p2p_buf = local_p2p_buf_1
             remote_p2p_buf = get_p2p_buf(remote_rank, 1)
         else:
@@ -408,22 +409,26 @@ def _pipelined_produce_and_all2all(
             # the correct order, there's very little room for the scheduling
             # order of subsequent kernels to be inconsistent across ranks.
             if step == 2:
-                torch.cuda._sleep(100)
+                torch.xpu._sleep(100)  # todo: no this API right now
             chunk_producer((rank + step) % group_size, p2p_buf)
-            symm_mem.barrier(channel=step % 2)
-            out_chunks[remote_rank].copy_(remote_p2p_buf)
+            # symm_mem.barrier(channel=step % 2)
+            dist.barrier()
+            # replaced with copy_buffer
+            # out_chunks[remote_rank].copy_(remote_p2p_buf)
+            symm_mem.copy_buffer(remote_p2p_buf, out_chunks[remote_rank], remote_p2p_buf.numel())
             # The local P2P buffer can only be overwritten by the next
             # chunk_producer after all peers have finished reading from it.
-            symm_mem.barrier(channel=step % 2)
+            # symm_mem.barrier(channel=step % 2)
+            dist.barrier()
 
     # If the sleep wasn't issued in the above loop, do it now.
     if group_size == 2:
-        torch.cuda._sleep(100)
+        torch.xpu._sleep(100)
 
     chunk_producer(rank, out_chunks[rank])
-    torch.cuda.current_stream().wait_stream(backend_stream)
-    symm_mem.barrier(channel=0)
-
+    torch.xpu.current_stream().wait_stream(backend_stream)
+    # symm_mem.barrier(channel=0)
+    dist.barrier()
 
 lib = torch.library.Library("symm_mem", "DEF")  # noqa: TOR901
 lib.define(
@@ -994,6 +999,7 @@ def restride_A_shard_for_fused_all_gather_matmul(
 
 
 @torch.library.impl(lib, "fused_matmul_reduce_scatter", "CUDA")
+@torch.library.impl(lib, "fused_matmul_reduce_scatter", "XPU")
 def _fused_matmul_reduce_scatter(
     A: torch.Tensor,
     B: torch.Tensor,
