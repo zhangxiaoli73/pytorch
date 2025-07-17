@@ -494,6 +494,7 @@ def _fused_all_gather_matmul_impl(
     scale_mode = _check_and_verify_fp8_all_gather_scale_mode(
         shard=A_shard, scale=A_scale, gather_dim=gather_dim, group_size=group.size()
     )
+    print(f"zl_debug get scaled mode = {scale_mode} of allgather+matmul", flush=True)
 
     # Computing block-wise matmul along the first dim of A
     if scale_mode == _ScaleMode.ROW_WISE_SHARDED:
@@ -836,6 +837,7 @@ def _fused_all_gather_scaled_matmul_fallback(
 
 
 @torch.library.impl(lib, "fused_all_gather_scaled_matmul", "CUDA")
+@torch.library.impl(lib, "fused_all_gather_scaled_matmul", "XPU")
 def _fused_all_gather_scaled_matmul(
     A_shard: torch.Tensor,
     Bs: list[torch.Tensor],
@@ -891,7 +893,8 @@ def _fused_all_gather_scaled_matmul(
 
     with torch.profiler.record_function("fused_all_gather_scaled_matmul"):
         A, res = _fused_all_gather_matmul_impl(
-            torch.ops.aten._scaled_mm.out,
+            # torch.ops.aten._scaled_mm.out,
+            torch.ops.vllm.fp8_gemm.out,
             A_shard,
             Bs,
             A_scale,
@@ -1049,6 +1052,7 @@ def _fused_matmul_reduce_scatter_impl(
 
 
 @torch.library.impl(lib, "fused_scaled_matmul_reduce_scatter", "CUDA")
+@torch.library.impl(lib, "fused_scaled_matmul_reduce_scatter", "XPU")
 def _fused_scaled_matmul_reduce_scatter(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -1082,7 +1086,8 @@ def _fused_scaled_matmul_reduce_scatter(
         )
     with torch.profiler.record_function("fused_scaled_matmul_reduce_scatter"):
         return _fused_scaled_matmul_reduce_scatter_impl(
-            mm_out_op=torch.ops.aten._scaled_mm.out,
+            # mm_out_op=torch.ops.aten._scaled_mm.out,
+            mm_out_op=torch.ops.vllm.fp8_gemm.out,
             A=A,
             B=B,
             A_scale=A_scale,
