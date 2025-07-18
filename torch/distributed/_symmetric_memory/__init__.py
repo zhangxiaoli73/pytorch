@@ -16,6 +16,7 @@ import torch.distributed.distributed_c10d as c10d
 from torch._C._autograd import DeviceType
 from torch._C._distributed_c10d import _SymmetricMemory, Work as _Work
 
+import vllm
 
 _group_name_to_store: dict[str, c10d.Store] = {}
 
@@ -568,6 +569,143 @@ def _fused_all_gather_matmul_impl(
     A = unflatten(A_flat) if return_A else None
     return A, [unflatten(output) for output in outputs]
 
+def _fused_all_gather_scaled_matmul_impl(
+    mm_out_op: torch._ops.OpOverload,
+    A_shard: torch.Tensor,
+    Bs: list[torch.Tensor],
+    A_scale: Optional[torch.Tensor],
+    kwargs_list: list[dict[str, Any]],
+    out_dtypes: list[Optional[torch.dtype]],
+    gather_dim: int,
+    group_name: str,
+    return_A: bool,
+) -> tuple[Optional[torch.Tensor], list[torch.Tensor]]:
+    if A_shard.dim() < 2:
+        raise ValueError("A_shard must be a matrix")
+    for B in Bs:
+        if B.dim() != 2:
+            raise ValueError("B must be a matrix")
+    if len(out_dtypes) != len(Bs):
+        raise ValueError("len(out_types) must be the same as len(Bs)")
+    if len(kwargs_list) != len(Bs):
+        raise ValueError("len(kwargs_list) must be the same as len(Bs)")
+    if gather_dim < 0 or gather_dim >= A_shard.dim():
+        raise ValueError("Invalid gather_dim")
+
+    group = c10d._resolve_process_group(group_name)
+
+    # Move the gather_dim to the front and flatten the tensor into a 2D matrix.
+    # The flattened tensor doesn't need to be contiguous (for computation
+    # efficiency), as _pipelined_all_gather_and_consume guarantees that shards
+    # passed to shard_consumer are contiguous.
+    A_shard_flat = A_shard.movedim(gather_dim, 0)
+    leading_dims = [group.size()] + list(A_shard_flat.shape[:-1])
+    A_shard_flat = A_shard_flat.flatten(0, -2)
+
+    # Helper function for reverting the above transformation
+    def unflatten(t: torch.Tensor) -> torch.Tensor:
+        return t.view(*leading_dims, -1).flatten(0, 1).movedim(0, gather_dim)
+
+    A_flat = A_shard_flat.new_empty(
+        A_shard_flat.shape[0] * group.size(),
+        A_shard_flat.shape[1],
+    )
+
+    outputs = [
+        A_flat.new_empty(A_flat.shape[0], B.shape[1], dtype=out_dtype or B.dtype)
+        for B, out_dtype in zip(Bs, out_dtypes)
+    ]
+    output_shards = [output.chunk(group.size()) for output in outputs]
+
+    scale_mode = _check_and_verify_fp8_all_gather_scale_mode(
+        shard=A_shard, scale=A_scale, gather_dim=gather_dim, group_size=group.size()
+    )
+    print(f"zl_debug get scaled mode = {scale_mode} of allgather+matmul", flush=True)
+
+    # Computing block-wise matmul along the first dim of A
+    if scale_mode == _ScaleMode.ROW_WISE_SHARDED:
+        assert A_scale is not None
+        A_scale_shard = A_scale.movedim(gather_dim, 0).flatten(0, -2)
+        A_scale_flat = A_scale_shard.new_empty(
+            A_scale_shard.shape[0] * group.size(),
+            A_scale_shard.shape[1],
+        )
+
+        def row_wise_sharded_consumer(shard: list[torch.Tensor], rank: int) -> None:
+            for idx, (B, kwargs) in enumerate(zip(Bs, kwargs_list)):
+                mm_out_op(
+                    shard[0],
+                    B,
+                    scale_a=shard[1],
+                    **kwargs,
+                    out=output_shards[idx][rank],
+                )
+
+        _pipelined_multi_all_gather_and_consume(
+            [A_shard_flat, A_scale_shard],
+            row_wise_sharded_consumer,
+            [A_flat, A_scale_flat],
+            group_name,
+            return_A,
+        )
+    elif scale_mode == _ScaleMode.ROW_WISE_REPLICATED:
+        assert A_scale is not None
+        A_scale_shards = (
+            A_scale.movedim(gather_dim, 0).flatten(0, -2).chunk(group.size())
+        )
+
+        def row_wise_replicated_consumer(shard: torch.Tensor, rank: int) -> None:
+            for idx, (B, kwargs) in enumerate(zip(Bs, kwargs_list)):
+                mm_out_op(
+                    shard,
+                    B,
+                    scale_a=A_scale_shards[rank],
+                    **kwargs,
+                    out=output_shards[idx][rank],
+                )
+
+        _pipelined_all_gather_and_consume(
+            A_shard_flat,
+            row_wise_replicated_consumer,
+            A_flat,
+            group_name,
+            return_A,
+        )
+    else:
+        # if scale_mode == _ScaleMode.TENSOR_WISE:
+        #     # assert A_scale is not None
+        #     # for kwargs in kwargs_list:
+        #     #     kwargs["scale_a"] = A_scale
+        # else:
+        #     assert scale_mode == _ScaleMode.UNSCALED
+
+        print(f"zl_debug scale mode is {scale_mode}", flush=True)
+
+        def default_consumer(shard: torch.Tensor, rank: int) -> None:
+            for idx, (B, kwargs) in enumerate(zip(Bs, kwargs_list)):
+                output_shards[idx][rank] = torch.ops.vllm.fp8_gemm(
+                    shard,
+                    False,
+                    B,
+                    True,
+                    None,
+                    torch.float16,
+                    None,
+                    kwargs['b_scale'],
+                    None,
+                    False
+                )
+
+        _pipelined_all_gather_and_consume(
+            A_shard_flat,
+            default_consumer,
+            A_flat,
+            group_name,
+            return_A,
+        )
+
+    A = unflatten(A_flat) if return_A else None
+    return A, [unflatten(output) for output in outputs]
 
 @torch.library.impl(lib, "fused_all_gather_matmul", "Meta")
 def _fused_all_gather_matmul_fallback(
@@ -801,7 +939,8 @@ def _fused_all_gather_scaled_matmul_fallback(
     elif scale_mode == _ScaleMode.ROW_WISE_REPLICATED:
         A_scale = A_scale.movedim(gather_dim, 0).flatten(0, -2)
     else:
-        assert scale_mode == _ScaleMode.TENSOR_WISE
+        # assert scale_mode == _ScaleMode.TENSOR_WISE
+        print(f"zl_debug scale model is tensor wise")
 
     def scaled_matmul(
         A: torch.Tensor,
@@ -814,15 +953,17 @@ def _fused_all_gather_scaled_matmul_fallback(
         use_fast_accum: bool,
     ) -> torch.Tensor:
         leading_dims = A.shape[:-1]
-        res = torch.ops.aten._scaled_mm(
+        res = torch.ops.vllm.fp8_gemm(
             A.flatten(0, -2),
+            False,
             B,
+            True,
+            None,
+            out_dtype,
             A_scale,
             B_scale,
-            bias,
-            result_scale,
-            out_dtype=out_dtype,
-            use_fast_accum=use_fast_accum,
+            None,
+            False
         )
         return res.unflatten(0, leading_dims)
 
@@ -892,9 +1033,9 @@ def _fused_all_gather_scaled_matmul(
         )
 
     with torch.profiler.record_function("fused_all_gather_scaled_matmul"):
-        A, res = _fused_all_gather_matmul_impl(
+        A, res = _fused_all_gather_scaled_matmul_impl(
             # torch.ops.aten._scaled_mm.out,
-            torch.ops.vllm.fp8_gemm.out,
+            torch.ops.vllm.fp8_gemm,
             A_shard,
             Bs,
             A_scale,
@@ -1087,7 +1228,7 @@ def _fused_scaled_matmul_reduce_scatter(
     with torch.profiler.record_function("fused_scaled_matmul_reduce_scatter"):
         return _fused_scaled_matmul_reduce_scatter_impl(
             # mm_out_op=torch.ops.aten._scaled_mm.out,
-            mm_out_op=torch.ops.vllm.fp8_gemm.out,
+            mm_out_op=torch.ops.vllm.fp8_gemm,
             A=A,
             B=B,
             A_scale=A_scale,
@@ -1227,13 +1368,26 @@ def _fused_scaled_matmul_reduce_scatter_impl(
         )
         A_scale_shards = list(A_scale.chunk(group.size()))
     else:
-        raise ValueError("A_scale cannot be none for scaled_mm")
+        # raise ValueError("A_scale cannot be none for scaled_mm")
+        print(f"zl_debug A_scale none for scaled_mm")
 
     # Computing block-wise matmul along the first dim of A
     def chunk_producer(rank: int, out: torch.Tensor) -> None:
-        mm_out_op(A_shards[rank], B, scale_a=A_scale_shards[rank], **kwargs, out=out)
+        # mm_out_op(A_shards[rank], B, scale_a=A_scale_shards[rank], **kwargs)
+        out = torch.ops.vllm.fp8_gemm(
+            A_shards[rank],
+            False,
+            B,
+            True,
+            None,
+            torch.float16,
+            None,
+            kwargs['b_scale'],
+            None,
+            False
+        )
 
-    # Stacked partials will be the 2D outputs of the the pipelined scaled mm, and will
+        # Stacked partials will be the 2D outputs of the the pipelined scaled mm, and will
     # have the shape (A_with_scatter_dim_0_tensor.shape[0], B.shape[1]) to align with the formula:
     # (a*b,c) @ (c,d) = (a*b,d)
     stacked_partials = A_with_scatter_dim_0.new_empty(
