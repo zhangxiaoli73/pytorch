@@ -17,6 +17,7 @@ from torch._C._autograd import DeviceType
 from torch._C._distributed_c10d import _SymmetricMemory, Work as _Work
 
 import vllm
+import vllm._ipex_ops
 
 _group_name_to_store: dict[str, c10d.Store] = {}
 
@@ -580,6 +581,7 @@ def _fused_all_gather_scaled_matmul_impl(
     group_name: str,
     return_A: bool,
 ) -> tuple[Optional[torch.Tensor], list[torch.Tensor]]:
+    print(f"zl_debug in _fused_all_gather_scaled_matmul_impl {A_shard.shape} {Bs[0].shape}", flush=True)
     if A_shard.dim() < 2:
         raise ValueError("A_shard must be a matrix")
     for B in Bs:
@@ -612,10 +614,12 @@ def _fused_all_gather_scaled_matmul_impl(
     )
 
     outputs = [
-        A_flat.new_empty(A_flat.shape[0], B.shape[1], dtype=out_dtype or B.dtype)
+        A_flat.new_empty(A_flat.shape[0], B.shape[0], dtype=out_dtype or B.dtype)
         for B, out_dtype in zip(Bs, out_dtypes)
     ]
+    print(f"zl_debug outputs size {outputs[0].shape} len(outputs)", flush=True)
     output_shards = [output.chunk(group.size()) for output in outputs]
+    #print(f"zl_debug get output shards {output_shards[0].shape} {len(output_shards)}", flush=True)
 
     scale_mode = _check_and_verify_fp8_all_gather_scale_mode(
         shard=A_shard, scale=A_scale, gather_dim=gather_dim, group_size=group.size()
@@ -683,7 +687,8 @@ def _fused_all_gather_scaled_matmul_impl(
 
         def default_consumer(shard: torch.Tensor, rank: int) -> None:
             for idx, (B, kwargs) in enumerate(zip(Bs, kwargs_list)):
-                output_shards[idx][rank] = torch.ops.vllm.fp8_gemm(
+                print(f"zl_debug all params {kwargs}", flush=True)
+                output_fp8= torch.ops.vllm.fp8_gemm(
                     shard,
                     False,
                     B,
@@ -691,11 +696,13 @@ def _fused_all_gather_scaled_matmul_impl(
                     None,
                     torch.float16,
                     None,
-                    kwargs['b_scale'],
+                    kwargs['scale_b'],
                     None,
                     False
                 )
-
+                print(f"zl_debug output {output_fp8.shape} {output_shards[idx][rank].shape}", flush=True)
+                output_shards[idx][rank].copy_(output_fp8)
+        print(f"zl_debug for _pipelined_all_gather_and_consume {A_shard_flat.shape} {A_flat.shape}")
         _pipelined_all_gather_and_consume(
             A_shard_flat,
             default_consumer,
@@ -749,7 +756,7 @@ def _fused_all_gather_matmul(
     contiguous, no extra copy is required for input layout transformation.
     Otherwise A_shard needs to be copied once.
     """
-    if _is_test_mode:
+    if False:
         return _fused_all_gather_matmul_fallback(
             A_shard, Bs, gather_dim, group_name, return_A=return_A
         )
@@ -1264,20 +1271,8 @@ def _fused_scaled_matmul_reduce_scatter_fallback(
     out_dtype: Optional[torch.dtype] = None,
     use_fast_accum: bool = False,
 ) -> torch.Tensor:
-    if A_scale.numel() > 1:
-        if A_scale.shape[:-1] != A.shape[:-1]:
-            raise ValueError(
-                "For row-wise scaling, the leading dims of A_scale "
-                "must match the leading dims of A "
-                f"(A shape: {A.shape}, A_scale shape: {A_scale.shape})"
-            )
-        A_scale = A_scale.flatten(0, -2).contiguous()
-    elif A_scale.numel() != 1:
-        raise ValueError(
-            "Invalid A_scale shape "
-            f"(A shape: {A.shape}, A_scale shape: {A_scale.shape})"
-        )
 
+    '''
     C = torch._scaled_mm(
         A.flatten(0, -2).contiguous(),
         B,
@@ -1287,8 +1282,21 @@ def _fused_scaled_matmul_reduce_scatter_fallback(
         result_scale,
         out_dtype,
         use_fast_accum,
-    )
-    C = C.view(*output_shape[:-1], B.shape[1])
+    )'''
+    C = torch.ops.vllm.fp8_gemm(
+            A.flatten(0, -2).contiguous(),
+            False,
+            B,
+            True,
+            None,
+            torch.float16,
+            None,
+            B_scale,
+            None,
+            False
+        )
+    # print(f"zl_debug in reduce scatter fallback with A= {A.shape} B={B.shape}, C={C.shape} output_shape = {output_shape}")
+    C = C.view(A.shape[0], B.shape[0])
     res = funcol.reduce_scatter_tensor(
         C,
         reduce_op,
@@ -1312,15 +1320,6 @@ def _fused_scaled_matmul_reduce_scatter_impl(
     group_name: str,
     output_shape: list[int],
 ) -> torch.Tensor:
-    if A.dim() < 2:
-        raise ValueError("A_shard must be a matrix")
-    if (
-        scatter_dim_after_maybe_reshape < 0
-        or scatter_dim_after_maybe_reshape >= A.dim()
-    ):
-        raise ValueError("Invalid scatter dim for 2D tensor input to scaled_mm")
-    if orig_scatter_dim < 0 or orig_scatter_dim >= len(output_shape):
-        raise ValueError("Invalid scatter dim for 3D+ output tensor")
     if B.dim() != 2:
         raise ValueError("B must be a matrix")
     if reduce_op == "sum":
@@ -1382,7 +1381,7 @@ def _fused_scaled_matmul_reduce_scatter_impl(
             None,
             torch.float16,
             None,
-            kwargs['b_scale'],
+            kwargs['scale_b'],
             None,
             False
         )
@@ -1391,7 +1390,7 @@ def _fused_scaled_matmul_reduce_scatter_impl(
     # have the shape (A_with_scatter_dim_0_tensor.shape[0], B.shape[1]) to align with the formula:
     # (a*b,c) @ (c,d) = (a*b,d)
     stacked_partials = A_with_scatter_dim_0.new_empty(
-        A_2D_with_scatter_dim_0.shape[0], B.shape[1], dtype=out_dtype or A.dtype
+        A_2D_with_scatter_dim_0.shape[0], B.shape[0], dtype=out_dtype or A.dtype
     )
 
     # Execute the pipelined mm/scaled_mm.
@@ -1435,8 +1434,9 @@ def _fused_scaled_matmul_reduce_scatter_impl(
     )
 
     # Output shape must be scattered along original scatter dim as well.
-    output_shape[orig_scatter_dim] //= group.size()
-    out = reduced_out.view(*output_shape)
+    #output_shape[orig_scatter_dim] //= group.size()
+    output_shape = [A.shape[0] // group.size(), B.shape[0]]
+    out = reduced_out.view(output_shape)
     return out
 
 
