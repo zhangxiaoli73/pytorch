@@ -16,8 +16,8 @@ import torch.distributed.distributed_c10d as c10d
 from torch._C._autograd import DeviceType
 from torch._C._distributed_c10d import _SymmetricMemory, Work as _Work
 
-import vllm
-import vllm._ipex_ops
+# import vllm
+# import vllm._ipex_ops
 
 _group_name_to_store: dict[str, c10d.Store] = {}
 
@@ -168,22 +168,9 @@ def _pipelined_multi_all_gather_and_consume(
     backend_stream = _get_backend_stream()
     backend_stream.wait_stream(torch.xpu.current_stream())
 
-    for x, y in zip(shard, ag_out):
-        assert x.is_contiguous(), (
-            "_pipelined_all_gather_and_consume: all tensors "
-            "in `shard` must be contiguous"
-        )
-        assert y.is_contiguous(), (
-            "_pipelined_all_gather_and_consume: all tensors "
-            "in `ag_out` must be contiguous"
-        )
-        assert x.shape[0] * group_size == y.shape[0]
-        assert x.shape[1:] == y.shape[1:]
-
-    def copy_shard(dst: list[torch.Tensor], src: list[torch.Tensor]) -> None:
-        for d, s in zip(dst, src):
-            symm_mem.copy_buffer(s, d, s.numel())
-            # d.copy_(s)
+    def copy_shard(dst: torch.Tensor, src: torch.Tensor) -> None:
+        symm_mem.copy_buffer(src, dst, src.numel())
+        # d.copy_(s)
 
     def get_p2p_bufs(remote_rank: int) -> list[torch.Tensor]:
         offset_bytes = 0
@@ -201,52 +188,11 @@ def _pipelined_multi_all_gather_and_consume(
 
     local_p2p_bufs = get_p2p_bufs(rank)
 
-    # shards[i] => shard from rank i
-    shards: list[list[torch.Tensor]] = [[] for _ in range(group_size)]
-    for x in ag_out:
-        for i, y in enumerate(x.chunk(group_size)):
-            shards[i].append(y)
+    # shards[i] => shard from rank i, shard with stage size instead of TP size
+    shards = ag_out[0]
+    # print(f"zl_debug shard shape {len(shards)} {shards[0].shape}")
 
-    # Parallelization strategy: after each rank copies its shard into its local
-    # p2p buffer, every rank issues independent p2p copy -> shard_consumer
-    # sequences to two streams. In addition to computation/communication
-    # overlapping, the strategy allows for computation/computation overlapping,
-    # greatly reducing quantization inefficiency.
-    #
-    # Notation:
-    # - "mv" for the copy to local buffer
-    # - "cp" for p2p copies
-    # - "b" for barriers
-    #
-    # Constraints:
-    # - The GPU scheduler may or may not overlap "mv" with the first shard_consumer.
-    # - "cp" from different streams cannot overlap.
-    #
-    # Ideal scenario 0 - "mv" overlaps with the first shard_consumer:
-    #
-    # stream 0: [ shard_consumer ][ cp ][ shard_consumer ]
-    # stream 1: [ mv ][b][ cp ][ shard_consumer ]
-    #
-    # Ideal scenario 1 - "mv" is scheduled before the first shard_consumer:
-    #
-    # stream 0:       [ shard_consumer ][ cp ][ shard_consumer ]
-    # stream 1: [ mv ][b][ cp ][ shard_consumer ]
-    #
-    # Suboptimal scenario 0 - "mv" is scheduled after the first shard_consumer:
-    #
-    # stream 0: [ shard_consumer ]               [ cp ][ shard_consumer ]
-    # stream 1:                   [ mv ][b][ cp ][ shard_consumer ]
-    #
-    # Suboptimal scenario 0 - "b" is scheduled after the first shard_consumer:
-    #
-    # stream 0:       [ shard_consumer ]         [ cp ][ shard_consumer ]
-    # stream 1: [ mv ]                  [b][ cp ][ shard_consumer ]
-    #
-    # We haven't yet figured out a way to ensure "mv" and "b" are either
-    # overlapped with or scheduled before the first shard_consumer. Thus, to
-    # prevent suboptimal scenarios, we are giving up the chance to overlap "mv"
-    # and "b" with the first shard_consumer for now.
-    copy_shard(dst=local_p2p_bufs, src=shard)
+    copy_shard(dst=local_p2p_bufs[0], src=shard[0])
     #torch.xpu.synchronize()
     #print(f"[Python] zl_debug copy shard tensor to local done {local_p2p_bufs} with shape {local_p2p_bufs.shape}", flush=True)
     # symm_mem.barrier(channel=1)
@@ -256,18 +202,24 @@ def _pipelined_multi_all_gather_and_consume(
     # At this point, all ranks have copied their local shard to
     # their local p2p buffer. Each rank can now copy and consume
     # remote shards.
-    shard_consumer(shard, rank)
+    shard_consumer(shard, 0)
+    local_shard = shard[0]
+    basic_offset = local_shard.size(0)
 
     for step in range(1, group_size):
-        if step % 2 == 0:
-            stream = torch.xpu.current_stream()
-        else:
-            stream = backend_stream
+        # if step % 2 == 0:
+        #     stream = torch.xpu.current_stream()
+        # else:
+        #     stream = backend_stream
+        stream = backend_stream
         remote_rank = (step + rank) % group_size
         remote_p2p_bufs = get_p2p_bufs(remote_rank)
         with stream:
-            copy_shard(dst=shards[remote_rank], src=remote_p2p_bufs)
-            shard_consumer(shards[remote_rank], remote_rank)
+            local_copy_shard = shards.narrow(dim=0, start=basic_offset * (step-1), length=basic_offset)
+            copy_shard(dst=local_copy_shard, src=remote_p2p_bufs[0])
+
+    with backend_stream:
+        shard_consumer([shards.narrow(dim=0, start=0, length=basic_offset*3)], 1)
 
     if ag_out_needed:
         # Copy from input to the all-gather output. Opportunistically overlap
@@ -277,7 +229,7 @@ def _pipelined_multi_all_gather_and_consume(
         else:
             stream = backend_stream
         with stream:
-            copy_shard(dst=shards[rank], src=shard)
+            copy_shard(dst=shards.narrow(dim=0, start=basic_offset * 3, length=basic_offset), src=shard[0])
 
     torch.xpu.current_stream().wait_stream(backend_stream)
     # symm_mem.barrier(channel=0)
@@ -298,7 +250,8 @@ def _pipelined_all_gather_and_consume(
         ag_out = all_gather_tensor(shard, gather_dim=0, group=group)
         shards = ag_out.chunk(group.size())
         for src_rank, shard in enumerate(shards):
-            shard_consumer(shard, src_rank)
+            shard_c
+            onsumer(shard, src_rank)
     """
 
     def adapter(shard: list[torch.Tensor], rank: int) -> None:
@@ -328,10 +281,11 @@ def _pipelined_produce_and_all2all(
         ]
         dist.all_to_all_single(output=output, input=torch.cat(chunks))
     """
-    out_chunks = output.chunk(c10d._get_group_size_by_name(group_name))
-    p2p_workspace_size_req = out_chunks[0].numel() * out_chunks[0].element_size() * dist.get_world_size()
+    stage_size = c10d._get_group_size_by_name(group_name) // 2
+    out_chunks = output.chunk(stage_size)
+    p2p_workspace_size_req = out_chunks[0].numel() * out_chunks[0].element_size() * stage_size
+    # print(f"zl_debug get P2P workspace size {p2p_workspace_size_req}")
     symm_mem = get_symm_mem_workspace(group_name, min_size=p2p_workspace_size_req)
-    group_size = symm_mem.world_size
     rank = symm_mem.rank
 
     # symm_mem.barrier(channel=0)
@@ -339,39 +293,48 @@ def _pipelined_produce_and_all2all(
     backend_stream = _get_backend_stream()
     backend_stream.wait_stream(torch.xpu.current_stream())
 
-    def get_p2p_buf(rank: int, idx: int) -> torch.Tensor:
+    # x, x + stage_size
+    def get_p2p_buf_local(rank: int, idx: int) -> torch.Tensor:
         offset = out_chunks[0].numel() * idx
         return symm_mem.get_buffer(
             rank, out_chunks[0].shape, out_chunks[0].dtype, offset
         )
 
-    for step in range(1, group_size):
-        remote_rank = (rank - step) % group_size
-        producer_rank = (rank + step) % group_size
-        p2p_buf = get_p2p_buf(rank, producer_rank)
-        remote_p2p_buf = get_p2p_buf(remote_rank, rank
-                                     )
-        if step % 2 == 0:
-            stream = torch.xpu.current_stream()
-        else:
-            stream = backend_stream
-        with stream:
-            # if step == 2:
-            #     torch.xpu._sleep(100)
-            chunk_producer(producer_rank, p2p_buf)
-            # symm_mem.barrier(channel=step % 2)
-            dist.barrier()
-            # replaced with copy_buffer
-            # out_chunks[remote_rank].copy_(remote_p2p_buf)
-            symm_mem.copy_buffer(remote_p2p_buf, out_chunks[remote_rank], remote_p2p_buf.numel())
-            # The local P2P buffer can only be overwritten by the next
-            # chunk_producer after all peers have finished reading from it.
-            # symm_mem.barrier(channel=step % 2)
+    def get_p2p_buf_remote(rank: int, idx: int) -> torch.Tensor:
+        offset = out_chunks[0].numel()//2 * idx
+        tmp_shape = [out_chunks[0].size(0)//2, out_chunks[0].size(1)]
+        return symm_mem.get_buffer(
+            rank, tmp_shape, out_chunks[0].dtype, offset
+        )
+
+    # step = 1
+    with backend_stream:
+        remote_rank = (rank - 1) % stage_size # try to pull
+        producer_rank = (rank + 1) % stage_size # for remote
+        p2p_buf = get_p2p_buf_local(rank, producer_rank)
+        chunk_producer(0, p2p_buf)
+        dist.barrier()
+        remote_p2p_buf = get_p2p_buf_remote(remote_rank, rank)
+        symm_mem.copy_buffer(remote_p2p_buf, out_chunks[0][:out_chunks[0].size(0)//2], remote_p2p_buf.numel())
+        remote_p2p_buf = get_p2p_buf_remote(remote_rank + stage_size, rank)
+        symm_mem.copy_buffer(remote_p2p_buf, out_chunks[0][out_chunks[0].size(0)//2:], remote_p2p_buf.numel())
+
+    # step = 2
+    with torch.xpu.current_stream():
+        remote_rank = (rank - 2) % stage_size # try to pull
+        producer_rank = (rank + 2) % stage_size # for remote
+        p2p_buf = get_p2p_buf_local(rank, producer_rank)
+        chunk_producer(1, p2p_buf)
+        dist.barrier()
+        remote_p2p_buf = get_p2p_buf_remote(remote_rank, rank)
+        symm_mem.copy_buffer(remote_p2p_buf, out_chunks[1][:out_chunks[0].size(0)//2], remote_p2p_buf.numel())
+        remote_p2p_buf = get_p2p_buf_remote(remote_rank + stage_size, rank)
+        symm_mem.copy_buffer(remote_p2p_buf, out_chunks[1][out_chunks[0].size(0)//2:], remote_p2p_buf.numel())
 
     # If the sleep wasn't issued in the above loop, do it now.
     # if group_size == 2:
     #     torch.xpu._sleep(100)
-    chunk_producer(rank, out_chunks[rank])
+    # chunk_producer(rank, out_chunks[rank])
     torch.xpu.current_stream().wait_stream(backend_stream)
     # symm_mem.barrier(channel=0)
     dist.barrier()
@@ -491,12 +454,13 @@ def _fused_all_gather_matmul_impl(
         A_flat.new_empty(A_flat.shape[0], B.shape[1], dtype=out_dtype or B.dtype)
         for B, out_dtype in zip(Bs, out_dtypes)
     ]
-    output_shards = [output.chunk(group.size()) for output in outputs]
+    # output_shards = [output.chunk(stage_size) for output in outputs]
+    output_shards = [output.split([A_flat.shape[0]//4, A_flat.shape[0]*3//4], dim=0) for output in outputs]
 
     scale_mode = _check_and_verify_fp8_all_gather_scale_mode(
         shard=A_shard, scale=A_scale, gather_dim=gather_dim, group_size=group.size()
     )
-    print(f"zl_debug get scaled mode = {scale_mode} of allgather+matmul", flush=True)
+    # print(f"zl_debug get scaled mode = {scale_mode} of allgather+matmul", flush=True)
 
     # Computing block-wise matmul along the first dim of A
     if scale_mode == _ScaleMode.ROW_WISE_SHARDED:
@@ -557,6 +521,7 @@ def _fused_all_gather_matmul_impl(
 
         def default_consumer(shard: torch.Tensor, rank: int) -> None:
             for idx, (B, kwargs) in enumerate(zip(Bs, kwargs_list)):
+                # print(f"zl_debug in default_consumer with shard = {shard.shape} B = {B.shape} output = {output_shards[idx][rank].shape}")
                 mm_out_op(shard, B, **kwargs, out=output_shards[idx][rank])
 
         _pipelined_all_gather_and_consume(
@@ -581,7 +546,7 @@ def _fused_all_gather_scaled_matmul_impl(
     group_name: str,
     return_A: bool,
 ) -> tuple[Optional[torch.Tensor], list[torch.Tensor]]:
-    print(f"zl_debug in _fused_all_gather_scaled_matmul_impl {A_shard.shape} {Bs[0].shape}", flush=True)
+    # print(f"zl_debug in _fused_all_gather_scaled_matmul_impl {A_shard.shape} {Bs[0].shape}", flush=True)
     if A_shard.dim() < 2:
         raise ValueError("A_shard must be a matrix")
     for B in Bs:
@@ -617,14 +582,14 @@ def _fused_all_gather_scaled_matmul_impl(
         A_flat.new_empty(A_flat.shape[0], B.shape[0], dtype=out_dtype or B.dtype)
         for B, out_dtype in zip(Bs, out_dtypes)
     ]
-    print(f"zl_debug outputs size {outputs[0].shape} len(outputs)", flush=True)
+    # print(f"zl_debug outputs size {outputs[0].shape} len(outputs)", flush=True)
     output_shards = [output.chunk(group.size()) for output in outputs]
     #print(f"zl_debug get output shards {output_shards[0].shape} {len(output_shards)}", flush=True)
 
     scale_mode = _check_and_verify_fp8_all_gather_scale_mode(
         shard=A_shard, scale=A_scale, gather_dim=gather_dim, group_size=group.size()
     )
-    print(f"zl_debug get scaled mode = {scale_mode} of allgather+matmul", flush=True)
+    # print(f"zl_debug get scaled mode = {scale_mode} of allgather+matmul", flush=True)
 
     # Computing block-wise matmul along the first dim of A
     if scale_mode == _ScaleMode.ROW_WISE_SHARDED:
@@ -683,11 +648,11 @@ def _fused_all_gather_scaled_matmul_impl(
         # else:
         #     assert scale_mode == _ScaleMode.UNSCALED
 
-        print(f"zl_debug scale mode is {scale_mode}", flush=True)
+        # print(f"zl_debug scale mode is {scale_mode}", flush=True)
 
         def default_consumer(shard: torch.Tensor, rank: int) -> None:
             for idx, (B, kwargs) in enumerate(zip(Bs, kwargs_list)):
-                print(f"zl_debug all params {kwargs}", flush=True)
+                # print(f"zl_debug all params {kwargs}", flush=True)
                 output_fp8= torch.ops.vllm.fp8_gemm(
                     shard,
                     False,
@@ -700,9 +665,9 @@ def _fused_all_gather_scaled_matmul_impl(
                     None,
                     False
                 )
-                print(f"zl_debug output {output_fp8.shape} {output_shards[idx][rank].shape}", flush=True)
+                # print(f"zl_debug output {output_fp8.shape} {output_shards[idx][rank].shape}", flush=True)
                 output_shards[idx][rank].copy_(output_fp8)
-        print(f"zl_debug for _pipelined_all_gather_and_consume {A_shard_flat.shape} {A_flat.shape}")
+        # print(f"zl_debug for _pipelined_all_gather_and_consume {A_shard_flat.shape} {A_flat.shape}")
         _pipelined_all_gather_and_consume(
             A_shard_flat,
             default_consumer,
@@ -945,9 +910,8 @@ def _fused_all_gather_scaled_matmul_fallback(
         )
     elif scale_mode == _ScaleMode.ROW_WISE_REPLICATED:
         A_scale = A_scale.movedim(gather_dim, 0).flatten(0, -2)
-    else:
         # assert scale_mode == _ScaleMode.TENSOR_WISE
-        print(f"zl_debug scale model is tensor wise")
+        # print(f"zl_debug scale model is tensor wise")
 
     def scaled_matmul(
         A: torch.Tensor,
@@ -1167,15 +1131,16 @@ def _fused_matmul_reduce_scatter_impl(
         raise ValueError("reduce_op must be sum or avg")
 
     group = c10d._resolve_process_group(group_name)
+    stage_size = group.size()  // 2
     out_shape = [*A.shape[:-1], B.shape[1]]
-    out_shape[scatter_dim] //= group.size()
+    out_shape[scatter_dim] //= stage_size
 
     # Move the scatter_dim to the front and flatten the tensor into a 2D matrix
     x = A.movedim(scatter_dim, 0)
     leading_dims = [group.size()] + list(x.shape[:-1])
     leading_dims[1] //= group.size()
     x = x.flatten(0, -2)
-    A_shards = x.chunk(group.size())
+    A_shards = x.chunk(stage_size)
 
     # Computing block-wise matmul along the first dim of A
     def chunk_producer(rank: int, out: torch.Tensor) -> None:
@@ -1366,9 +1331,8 @@ def _fused_scaled_matmul_reduce_scatter_impl(
             .flatten(0, -2)
         )
         A_scale_shards = list(A_scale.chunk(group.size()))
-    else:
         # raise ValueError("A_scale cannot be none for scaled_mm")
-        print(f"zl_debug A_scale none for scaled_mm")
+        # print(f"zl_debug A_scale none for scaled_mm")
 
     # Computing block-wise matmul along the first dim of A
     def chunk_producer(rank: int, out: torch.Tensor) -> None:
