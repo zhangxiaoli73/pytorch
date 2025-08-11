@@ -38,6 +38,19 @@ def test_pipeline(rank: int, world_size: int):
     A_shard = torch.randn(rows_per_rank, K, device="xpu")
     # 全量 B（在每个 rank 上相同）
     B = torch.randn(K, N, device="xpu")
+    print(f"zl_debug A = {A_shard} B = {B}", flush=True)
+
+    # === 校验 A_full ===
+    gathered = [torch.zeros_like(A_shard) for _ in range(world_size)]
+    dist.all_gather(gathered, A_shard)
+    expected_A_full = torch.cat(gathered, dim=0)
+
+    # === 校验 final_outputs ===
+    expected_product = expected_A_full @ B  # [rows_total, N]
+    # 将 expected_product 按行切成 world_size 份
+    scatter = torch.randn(rows_per_rank, N, device="xpu")
+    dist.reduce_scatter_tensor(scatter, expected_product)
+    torch.xpu.synchronize()
 
     kwargs_list = [{}]  # 对应 Bs 中每个矩阵的 kwargs（这里只测一个 B）
 
@@ -51,17 +64,6 @@ def test_pipeline(rank: int, world_size: int):
     )
     torch.xpu.synchronize()
     print(f"DONE!!!!!!!!!!!!! {final_outputs.shape}", flush=True)
-
-    # === 校验 A_full ===
-    gathered = [torch.zeros_like(A_shard) for _ in range(world_size)]
-    dist.all_gather(gathered, A_shard)
-    expected_A_full = torch.cat(gathered, dim=0)
-
-    # === 校验 final_outputs ===
-    expected_product = expected_A_full @ B  # [rows_total, N]
-    # 将 expected_product 按行切成 world_size 份
-    scatter = torch.randn(rows_per_rank, N, device="xpu")
-    dist.reduce_scatter_tensor(scatter, expected_product)
 
     print(f"fused kernel {final_outputs} fallback = {scatter}")
     dist.destroy_process_group()

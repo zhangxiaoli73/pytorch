@@ -464,10 +464,6 @@ def _fused_all_gather_matmul_reducescatter_impl(
     leading_dims = [group.size()] + list(A_shard_flat.shape[:-1])
     A_shard_flat = A_shard_flat.flatten(0, -2)
 
-    # Helper function for reverting the above transformation
-    def unflatten(t: torch.Tensor) -> torch.Tensor:
-        return t.view(*leading_dims, -1).flatten(0, 1).movedim(0, 0)
-
     A_flat = A_shard_flat.new_empty(
         A_shard_flat.shape[0],
         A_shard_flat.shape[1],
@@ -476,6 +472,7 @@ def _fused_all_gather_matmul_reducescatter_impl(
     stacked_partials = A_flat.new_empty(A_flat.shape[0] * group.size(), Bs.shape[1], dtype=Bs.dtype)
 
     def default_consumer(shard_in: torch.Tensor, shard_out: torch.Tensor) -> None:
+        print(f"zl_debug in shard comumer {shard_in} {Bs}", flush=True)
         shard_consumer(shard_in, Bs, out=shard_out)
 
     print(f"zl_debug A_shard_flat = {A_shard_flat.shape} output = {stacked_partials.shape}", flush=True)
@@ -490,6 +487,7 @@ def _fused_all_gather_matmul_reducescatter_impl(
     # in a single reduction kernel.
     scatter_dim = 0
     reduce_fn = partial(torch.sum, dim=0) # zl_debug: only supprot sum now
+    print(f"zl_debug before reduction {stacked_partials}", flush=True)
     return reduce_fn(
         stacked_partials.view(*leading_dims, -1)
         .movedim(1, scatter_dim + 1)
@@ -503,7 +501,6 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
     output: torch.Tensor,
     group_name: str,
 ) -> None:
-
     p2p_allgather_size = shard.numel() * dist.get_world_size()
     p2p_workspace_size_req = shard.numel() * shard.element_size() * dist.get_world_size() * 2
     print(f"zl_debug: p2p workspace size {p2p_workspace_size_req}", flush=True)
@@ -516,14 +513,18 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
     backend_stream = _get_backend_stream()
     backend_stream.wait_stream(torch.xpu.current_stream())
 
+    intermediate_tmp = shard.new_empty(shard.shape[0] * group_size, shard.shape[1], dtype=shard.dtype)
+    intermediate_chunks = intermediate_tmp.chunk(group_size)
+    outputs_chunk = output.chunk(group_size)
+
     def copy_shard(dst: torch.Tensor, src: torch.Tensor) -> None:
         symm_mem.copy_buffer(src, dst, src.numel())
         # d.copy_(s)
 
     def get_reducescatter_buf(rank: int, idx: int) -> torch.Tensor:
-        offset = p2p_allgather_size + shard.numel() * idx
+        offset = p2p_allgather_size + outputs_chunk[0].numel() * idx
         return symm_mem.get_buffer(
-            rank, shard.shape, shard.dtype, offset
+            rank, outputs_chunk[0].shape, outputs_chunk[0].dtype, offset
         )
 
     def get_allgather_buf(remote_rank: int) -> torch.Tensor:
@@ -536,17 +537,19 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
         )
         return buf
 
-    intermediate_tmp = shard.new_empty(shard.shape[0] * group_size, shard.shape[1], dtype=shard.dtype)
-    intermediate_chunks = intermediate_tmp.chunk(group_size)
-    outputs_chunk = output.chunk(group_size)
+    # initialization symmetric memory
+    p2p_local = get_allgather_buf(rank)
+    copy_shard(p2p_local, shard)
+    dist.barrier()
 
     for step in range(group_size):
-        if step % 2 == 0:
-            stream = torch.xpu.current_stream()
-        else:
-            stream = backend_stream
-        # producer_rank = step % group_size
-        # comsumer_rank = (rank + step) % group_size
+        # if step % 2 == 0:
+        #     stream = torch.xpu.current_stream()
+        # else:
+        #     stream = backend_stream
+        stream = torch.xpu.current_stream()
+        # producer_rank = (rank + step) % group_size
+        # comsumer_rank = (producer_rank + 1) % group_size # means this result is for peer comsumer_rank
         if rank == 0 and step == 0:
             producer_rank = 0
             comsumer_rank = 1
@@ -564,17 +567,32 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
         all_gather_buf = get_allgather_buf(producer_rank)
         # Step: get remote rank reduce_scatter shard
         reducescatter_buf = get_reducescatter_buf(comsumer_rank, rank)
+        # Step: compute on local symmetric memory
+        gemm_output = get_reducescatter_buf(rank, producer_rank)
         print(f"zl_debug producer shape = {all_gather_buf.shape} comsumer shape = {reducescatter_buf.shape} "
               f"intermediate_chunk shape = {intermediate_chunks[producer_rank].shape} "
               f"output_shard={outputs_chunk[producer_rank].shape}", flush=True)
 
         with stream:
             copy_shard(dst=intermediate_chunks[producer_rank], src=all_gather_buf) # allgather
-            shard_consumer(intermediate_chunks[producer_rank], outputs_chunk[producer_rank]) # compute
+            print(f"zl_debug copy shard from {producer_rank} to get {intermediate_chunks[producer_rank]} gemm_output={gemm_output.shape}", flush=True)
+            shard_consumer(intermediate_chunks[producer_rank], gemm_output) # compute on symmetric memory
+            print(f"zl_debug after matmul to get {gemm_output}", flush=True)
             dist.barrier()
-            if comsumer_rank != rank:
-                # copy from local to remote
-                symm_mem.copy_buffer(outputs_chunk[comsumer_rank], reducescatter_buf, reducescatter_buf.numel()) # src, dst
+            # from symmetric to local output
+            # if comsumer_rank == rank:
+            # push from local gemm_output to remote buffer
+            symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[comsumer_rank], outputs_chunk[comsumer_rank].numel())  # src, dst
+    # if rank == 0:
+    #     reducescatter_buf = get_reducescatter_buf(1, rank)
+    #     print(f"zl_debug before copy from remote {outputs_chunk}")
+    #     symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[1], reducescatter_buf.numel())
+    #     print(f"zl_debug after copy from remote {outputs_chunk}")
+    # elif rank == 1:
+    #     reducescatter_buf = get_reducescatter_buf(0, rank)
+    #     print(f"zl_debug before copy from remote {outputs_chunk}")
+    #     symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[0], reducescatter_buf.numel())
+    #     print(f"zl_debug after copy from remote {outputs_chunk}")
 
     torch.xpu.current_stream().wait_stream(backend_stream)
     # symm_mem.barrier(channel=0)
