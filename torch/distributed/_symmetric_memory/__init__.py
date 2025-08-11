@@ -382,6 +382,11 @@ lib.define(
     tags=[torch._C.Tag.needs_fixed_stride_order],
 )
 lib.define(
+    "fused_all_gather_matmul_reducescatter("
+    "Tensor A_shard, Tensor Bs, str group_name) -> Tensor",
+    tags=[torch._C.Tag.needs_fixed_stride_order],
+)
+lib.define(
     "fused_all_gather_scaled_matmul("
     "Tensor A, Tensor[] Bs, Tensor A_scale, Tensor[] B_scales, "
     "int gather_dim, str group_name, "
@@ -444,11 +449,10 @@ def _check_and_verify_fp8_all_gather_scale_mode(
         )
 
 # zl_debug_kernel
-def _fused_all_gather_matmul_reducescatter_impl(
-    mm_out_op: torch._ops.OpOverload,
+@torch.library.impl(lib, "fused_all_gather_matmul_reducescatter", "XPU")
+def _fused_all_gather_matmul_reducescatter(
     A_shard: torch.Tensor,
     Bs: torch.Tensor,
-    kwargs_list: list[dict[str, Any]],
     group_name: str,
 ) -> torch.Tensor:
     if A_shard.dim() < 2:
@@ -471,6 +475,7 @@ def _fused_all_gather_matmul_reducescatter_impl(
 
     stacked_partials = A_flat.new_empty(A_flat.shape[0] * group.size(), Bs.shape[1], dtype=Bs.dtype)
 
+    mm_out_op = torch.ops.aten.mm.out
     def default_consumer(shard_in: torch.Tensor, shard_out: torch.Tensor) -> None:
         print(f"zl_debug in shard comumer {shard_in} {Bs}", flush=True)
         mm_out_op(shard_in, Bs, out=shard_out)

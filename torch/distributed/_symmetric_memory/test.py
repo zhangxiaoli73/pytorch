@@ -9,7 +9,7 @@ from torch.distributed._symmetric_memory import (
     _fused_all_gather_matmul_fallback,
     _fused_all_gather_scaled_matmul_fallback,
     _fused_matmul_reduce_scatter_fallback,
-    _fused_all_gather_matmul_reducescatter_impl,
+    _fused_all_gather_matmul_reducescatter,
     enable_symm_mem_for_group,
     restride_A_for_fused_matmul_reduce_scatter,
     restride_A_shard_for_fused_all_gather_matmul,
@@ -67,11 +67,9 @@ def test_pipeline(rank: int, world_size: int):
     # 调用 fused API
     with prof:
         for count in range(10):
-            final_outputs = _fused_all_gather_matmul_reducescatter_impl(
-                torch.ops.aten.mm.out,
+            final_outputs = torch.ops.symm_mem.fused_all_gather_matmul_reducescatter(
                 A_shard=A_shard,
                 Bs=B,
-                kwargs_list=kwargs_list,
                 group_name=group_name,  # 默认进程组
             )
         torch.xpu.synchronize()
