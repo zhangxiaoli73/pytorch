@@ -548,25 +548,25 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
         # else:
         #     stream = backend_stream
         stream = torch.xpu.current_stream()
-        # producer_rank = (rank + step) % group_size
-        # comsumer_rank = (producer_rank + 1) % group_size # means this result is for peer comsumer_rank
-        if rank == 0 and step == 0:
-            producer_rank = 0
-            comsumer_rank = 1
-        elif rank == 0 and step == 1:
-            producer_rank = 1
-            comsumer_rank = 0
-        elif rank == 1 and step == 0:
-            producer_rank = 1
-            comsumer_rank = 0
-        elif rank == 1 and step == 1:
-            producer_rank = 0
-            comsumer_rank = 1
+        producer_rank = (rank + step) % group_size
+        comsumer_rank = (producer_rank + 1) % group_size # means this result is for peer comsumer_rank
+        # if rank == 0 and step == 0:
+        #     producer_rank = 0
+        #     comsumer_rank = 1
+        # elif rank == 0 and step == 1:
+        #     producer_rank = 1
+        #     comsumer_rank = 0
+        # elif rank == 1 and step == 0:
+        #     producer_rank = 1
+        #     comsumer_rank = 0
+        # elif rank == 1 and step == 1:
+        #     producer_rank = 0
+        #     comsumer_rank = 1
         print(f"zl_debug producer rank = {producer_rank} comsumer_rank = {comsumer_rank}", flush=True)
         # Step1: get remote rank input shard
         all_gather_buf = get_allgather_buf(producer_rank)
         # Step: get remote rank reduce_scatter shard
-        reducescatter_buf = get_reducescatter_buf(comsumer_rank, rank)
+        reducescatter_buf = get_reducescatter_buf(producer_rank, rank)
         # Step: compute on local symmetric memory
         gemm_output = get_reducescatter_buf(rank, producer_rank)
         print(f"zl_debug producer shape = {all_gather_buf.shape} comsumer shape = {reducescatter_buf.shape} "
@@ -582,7 +582,7 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
             # from symmetric to local output
             # if comsumer_rank == rank:
             # push from local gemm_output to remote buffer
-            symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[comsumer_rank], outputs_chunk[comsumer_rank].numel())  # src, dst
+            symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[producer_rank], outputs_chunk[producer_rank].numel())  # src, dst
     # if rank == 0:
     #     reducescatter_buf = get_reducescatter_buf(1, rank)
     #     print(f"zl_debug before copy from remote {outputs_chunk}")
