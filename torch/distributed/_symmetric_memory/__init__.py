@@ -16,8 +16,8 @@ import torch.distributed.distributed_c10d as c10d
 from torch._C._autograd import DeviceType
 from torch._C._distributed_c10d import _SymmetricMemory, Work as _Work
 
-import vllm
-import vllm._ipex_ops
+# import vllm
+# import vllm._ipex_ops
 
 _group_name_to_store: dict[str, c10d.Store] = {}
 
@@ -349,8 +349,7 @@ def _pipelined_produce_and_all2all(
         remote_rank = (rank - step) % group_size
         producer_rank = (rank + step) % group_size
         p2p_buf = get_p2p_buf(rank, producer_rank)
-        remote_p2p_buf = get_p2p_buf(remote_rank, rank
-                                     )
+        remote_p2p_buf = get_p2p_buf(remote_rank, rank)
         if step % 2 == 0:
             stream = torch.xpu.current_stream()
         else:
@@ -444,6 +443,142 @@ def _check_and_verify_fp8_all_gather_scale_mode(
             f"(shard shape: {shard.shape}, scale shape: {scale.shape})"
         )
 
+# zl_debug_kernel
+def _fused_all_gather_matmul_reducescatter_impl(
+    shard_consumer: Callable[[torch.Tensor, torch.Tensor], None],
+    A_shard: torch.Tensor,
+    Bs: torch.Tensor,
+    kwargs_list: list[dict[str, Any]],
+    group_name: str,
+) -> torch.Tensor:
+    if A_shard.dim() < 2:
+        raise ValueError("A_shard must be a matrix")
+
+    group = c10d._resolve_process_group(group_name)
+
+    # Move the gather_dim to the front and flatten the tensor into a 2D matrix.
+    # The flattened tensor doesn't need to be contiguous (for computation
+    # efficiency), as _pipelined_all_gather_and_consume guarantees that shards
+    # passed to shard_consumer are contiguous.
+    A_shard_flat = A_shard.movedim(0, 0)
+    leading_dims = [group.size()] + list(A_shard_flat.shape[:-1])
+    A_shard_flat = A_shard_flat.flatten(0, -2)
+
+    # Helper function for reverting the above transformation
+    def unflatten(t: torch.Tensor) -> torch.Tensor:
+        return t.view(*leading_dims, -1).flatten(0, 1).movedim(0, 0)
+
+    A_flat = A_shard_flat.new_empty(
+        A_shard_flat.shape[0],
+        A_shard_flat.shape[1],
+    )
+
+    stacked_partials = A_flat.new_empty(A_flat.shape[0] * group.size(), Bs.shape[1], dtype=Bs.dtype)
+
+    def default_consumer(shard_in: torch.Tensor, shard_out: torch.Tensor) -> None:
+        shard_consumer(shard_in, Bs, out=shard_out)
+
+    print(f"zl_debug A_shard_flat = {A_shard_flat.shape} output = {stacked_partials.shape}", flush=True)
+    _pipelined_all_gather_and_reduce_scatter_consume(
+        A_shard_flat,
+        default_consumer,
+        stacked_partials,
+        group_name,
+    )
+
+    # Ensures that the transpose and reduction produce contiguous result
+    # in a single reduction kernel.
+    scatter_dim = 0
+    reduce_fn = partial(torch.sum, dim=0) # zl_debug: only supprot sum now
+    return reduce_fn(
+        stacked_partials.view(*leading_dims, -1)
+        .movedim(1, scatter_dim + 1)
+        .movedim(0, scatter_dim),
+        dim=scatter_dim,
+    )
+
+def _pipelined_all_gather_and_reduce_scatter_consume(
+    shard: torch.Tensor,
+    shard_consumer: Callable[[torch.Tensor, torch.Tensor], None],
+    output: torch.Tensor,
+    group_name: str,
+) -> None:
+
+    p2p_allgather_size = shard.numel() * dist.get_world_size()
+    p2p_workspace_size_req = shard.numel() * shard.element_size() * dist.get_world_size() * 2
+    print(f"zl_debug: p2p workspace size {p2p_workspace_size_req}", flush=True)
+    # first part for all_gather, second part for reduce_scatter
+    symm_mem = get_symm_mem_workspace(group_name, min_size=p2p_workspace_size_req)
+    group_size = symm_mem.world_size
+    rank = symm_mem.rank
+
+    dist.barrier()
+    backend_stream = _get_backend_stream()
+    backend_stream.wait_stream(torch.xpu.current_stream())
+
+    def copy_shard(dst: torch.Tensor, src: torch.Tensor) -> None:
+        symm_mem.copy_buffer(src, dst, src.numel())
+        # d.copy_(s)
+
+    def get_reducescatter_buf(rank: int, idx: int) -> torch.Tensor:
+        offset = p2p_allgather_size + shard.numel() * idx
+        return symm_mem.get_buffer(
+            rank, shard.shape, shard.dtype, offset
+        )
+
+    def get_allgather_buf(remote_rank: int) -> torch.Tensor:
+        offset_bytes = 0
+        buf = symm_mem.get_buffer(
+            remote_rank,
+            shard.shape,
+            shard.dtype,
+            storage_offset=offset_bytes // shard.element_size(),
+        )
+        return buf
+
+    intermediate_tmp = shard.new_empty(shard.shape[0] * group_size, shard.shape[1], dtype=shard.dtype)
+    intermediate_chunks = intermediate_tmp.chunk(group_size)
+    outputs_chunk = output.chunk(group_size)
+
+    for step in range(group_size):
+        if step % 2 == 0:
+            stream = torch.xpu.current_stream()
+        else:
+            stream = backend_stream
+        # producer_rank = step % group_size
+        # comsumer_rank = (rank + step) % group_size
+        if rank == 0 and step == 0:
+            producer_rank = 0
+            comsumer_rank = 1
+        elif rank == 0 and step == 1:
+            producer_rank = 1
+            comsumer_rank = 0
+        elif rank == 1 and step == 0:
+            producer_rank = 1
+            comsumer_rank = 0
+        elif rank == 1 and step == 1:
+            producer_rank = 0
+            comsumer_rank = 1
+        print(f"zl_debug producer rank = {producer_rank} comsumer_rank = {comsumer_rank}", flush=True)
+        # Step1: get remote rank input shard
+        all_gather_buf = get_allgather_buf(producer_rank)
+        # Step: get remote rank reduce_scatter shard
+        reducescatter_buf = get_reducescatter_buf(comsumer_rank, rank)
+        print(f"zl_debug producer shape = {all_gather_buf.shape} comsumer shape = {reducescatter_buf.shape} "
+              f"intermediate_chunk shape = {intermediate_chunks[producer_rank].shape} "
+              f"output_shard={outputs_chunk[producer_rank].shape}", flush=True)
+
+        with stream:
+            copy_shard(dst=intermediate_chunks[producer_rank], src=all_gather_buf) # allgather
+            shard_consumer(intermediate_chunks[producer_rank], outputs_chunk[producer_rank]) # compute
+            dist.barrier()
+            if comsumer_rank != rank:
+                # copy from local to remote
+                symm_mem.copy_buffer(outputs_chunk[comsumer_rank], reducescatter_buf, reducescatter_buf.numel()) # src, dst
+
+    torch.xpu.current_stream().wait_stream(backend_stream)
+    # symm_mem.barrier(channel=0)
+    dist.barrier()
 
 def _fused_all_gather_matmul_impl(
     mm_out_op: torch._ops.OpOverload,
