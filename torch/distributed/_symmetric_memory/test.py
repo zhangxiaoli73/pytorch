@@ -22,6 +22,7 @@ os.environ['MASTER_PORT'] = '29803'
 dist.init_process_group(backend='xccl')
 group_name = dist.group.WORLD.group_name
 
+enable_profile=False
 
 def matmul_shard_consumer(in_shard: torch.Tensor, Bs: torch.Tensor, out: torch.Tensor) -> None:
     out.copy_(torch.matmul(in_shard, Bs))
@@ -30,6 +31,15 @@ def test_pipeline(rank: int, world_size: int):
     torch.manual_seed(1234 + rank)
     torch.xpu.set_device(rank)
 
+    if enable_profile:
+        prof = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.XPU,
+            ]
+        )
+    else:
+        prof = nullcontext()
     rows_per_rank = 2
     K = 4
     N = 3
@@ -55,17 +65,22 @@ def test_pipeline(rank: int, world_size: int):
     kwargs_list = [{}]  # 对应 Bs 中每个矩阵的 kwargs（这里只测一个 B）
 
     # 调用 fused API
-    final_outputs = _fused_all_gather_matmul_reducescatter_impl(
-        shard_consumer=matmul_shard_consumer,
-        A_shard=A_shard,
-        Bs=B,
-        kwargs_list=kwargs_list,
-        group_name=group_name,  # 默认进程组
-    )
-    torch.xpu.synchronize()
-    print(f"DONE!!!!!!!!!!!!! {final_outputs.shape}", flush=True)
+    with prof:
+        for count in range(10):
+            final_outputs = _fused_all_gather_matmul_reducescatter_impl(
+                torch.ops.aten.mm.out,
+                A_shard=A_shard,
+                Bs=B,
+                kwargs_list=kwargs_list,
+                group_name=group_name,  # 默认进程组
+            )
+        torch.xpu.synchronize()
+    if enable_profile:
+         prof.export_chrome_trace("./profile_kineto_trace_" + str(rank) + ".json")
 
-    print(f"fused kernel {final_outputs} fallback = {scatter}")
+    print(f"DONE!!!!!!!!!!!!! {final_outputs.shape}", flush=True)
+    # print(f"fused kernel {final_outputs} fallback = {scatter}")
+    assert torch.allclose(scatter, final_outputs)
     dist.destroy_process_group()
 
 rank = dist.get_rank()

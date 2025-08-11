@@ -445,7 +445,7 @@ def _check_and_verify_fp8_all_gather_scale_mode(
 
 # zl_debug_kernel
 def _fused_all_gather_matmul_reducescatter_impl(
-    shard_consumer: Callable[[torch.Tensor, torch.Tensor], None],
+    mm_out_op: torch._ops.OpOverload,
     A_shard: torch.Tensor,
     Bs: torch.Tensor,
     kwargs_list: list[dict[str, Any]],
@@ -473,7 +473,7 @@ def _fused_all_gather_matmul_reducescatter_impl(
 
     def default_consumer(shard_in: torch.Tensor, shard_out: torch.Tensor) -> None:
         print(f"zl_debug in shard comumer {shard_in} {Bs}", flush=True)
-        shard_consumer(shard_in, Bs, out=shard_out)
+        mm_out_op(shard_in, Bs, out=shard_out)
 
     print(f"zl_debug A_shard_flat = {A_shard_flat.shape} output = {stacked_partials.shape}", flush=True)
     _pipelined_all_gather_and_reduce_scatter_consume(
@@ -549,26 +549,13 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
         #     stream = backend_stream
         stream = torch.xpu.current_stream()
         producer_rank = (rank + step) % group_size
-        comsumer_rank = (producer_rank + 1) % group_size # means this result is for peer comsumer_rank
-        # if rank == 0 and step == 0:
-        #     producer_rank = 0
-        #     comsumer_rank = 1
-        # elif rank == 0 and step == 1:
-        #     producer_rank = 1
-        #     comsumer_rank = 0
-        # elif rank == 1 and step == 0:
-        #     producer_rank = 1
-        #     comsumer_rank = 0
-        # elif rank == 1 and step == 1:
-        #     producer_rank = 0
-        #     comsumer_rank = 1
-        print(f"zl_debug producer rank = {producer_rank} comsumer_rank = {comsumer_rank}", flush=True)
+        print(f"zl_debug producer rank = {producer_rank}", flush=True)
         # Step1: get remote rank input shard
         all_gather_buf = get_allgather_buf(producer_rank)
-        # Step: get remote rank reduce_scatter shard
-        reducescatter_buf = get_reducescatter_buf(producer_rank, rank)
-        # Step: compute on local symmetric memory
+        # Step2: compute on local symmetric memory
         gemm_output = get_reducescatter_buf(rank, producer_rank)
+        # Step: get remote reduce_scatter shard
+        reducescatter_buf = get_reducescatter_buf(producer_rank, rank)
         print(f"zl_debug producer shape = {all_gather_buf.shape} comsumer shape = {reducescatter_buf.shape} "
               f"intermediate_chunk shape = {intermediate_chunks[producer_rank].shape} "
               f"output_shard={outputs_chunk[producer_rank].shape}", flush=True)
@@ -579,20 +566,7 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
             shard_consumer(intermediate_chunks[producer_rank], gemm_output) # compute on symmetric memory
             print(f"zl_debug after matmul to get {gemm_output}", flush=True)
             dist.barrier()
-            # from symmetric to local output
-            # if comsumer_rank == rank:
-            # push from local gemm_output to remote buffer
             symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[producer_rank], outputs_chunk[producer_rank].numel())  # src, dst
-    # if rank == 0:
-    #     reducescatter_buf = get_reducescatter_buf(1, rank)
-    #     print(f"zl_debug before copy from remote {outputs_chunk}")
-    #     symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[1], reducescatter_buf.numel())
-    #     print(f"zl_debug after copy from remote {outputs_chunk}")
-    # elif rank == 1:
-    #     reducescatter_buf = get_reducescatter_buf(0, rank)
-    #     print(f"zl_debug before copy from remote {outputs_chunk}")
-    #     symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[0], reducescatter_buf.numel())
-    #     print(f"zl_debug after copy from remote {outputs_chunk}")
 
     torch.xpu.current_stream().wait_stream(backend_stream)
     # symm_mem.barrier(channel=0)
