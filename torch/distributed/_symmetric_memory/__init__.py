@@ -384,7 +384,7 @@ lib.define(
 )
 # lib.define(
 #     "fused_all_gather_matmul_reducescatter("
-#     "Tensor A_shard, Tensor Bs, str group_name) -> Tensor",
+#     "Tensor A_shard, Callable[[torch.Tensor, torch.Tensor], None] shard_comsumer, int N_dim, str group_name) -> Tensor",
 #     tags=[torch._C.Tag.needs_fixed_stride_order],
 # )
 lib.define(
@@ -450,7 +450,7 @@ def _check_and_verify_fp8_all_gather_scale_mode(
         )
 
 # zl_debug_kernel
-# @torch.library.impl(lib, "fused_all_gather_matmul_reducescatter", "XPU")
+@torch.library.impl(lib, "fused_all_gather_matmul_reducescatter", "XPU")
 def _fused_all_gather_matmul_reducescatter(
     A_shard: torch.Tensor,
     shard_consumer: Callable[[torch.Tensor, torch.Tensor], None],
@@ -578,7 +578,8 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
                 copy_shard(dst=intermediate_chunks[prefech_producer_rank], src=prefecth_allgather_buf)  # allgather
         with stream:
             dist.barrier()
-            symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[remote_rank], outputs_chunk[remote_rank].numel())  # src, dst
+            copy_shard(dst=outputs_chunk[remote_rank], src=reducescatter_buf)
+            # symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[remote_rank], outputs_chunk[remote_rank].numel())  # src, dst
 
     # At this point, all ranks have copied their local shard to
     # their local p2p buffer. Each rank can now copy and consume
