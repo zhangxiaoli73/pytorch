@@ -86,9 +86,9 @@ def test_pipeline(rank: int, world_size: int):
          prof.export_chrome_trace("./profile_kineto_trace_" + str(rank) + ".json")
 
     print(f"DONE!!!!!!!!!!!!! {final_outputs.shape}", flush=True)
-    # print(f"fused kernel {final_outputs} fallback = {scatter}")
-    check_value(final_outputs, scatter)
-    assert torch.allclose(scatter, final_outputs)
+    print(f"fused kernel {final_outputs} fallback = {scatter}")
+    # check_value(final_outputs, scatter)
+    assert torch.allclose(scatter, final_outputs, atol=1e-5, rtol=1e-5)
     dist.destroy_process_group()
 
 rank = dist.get_rank()

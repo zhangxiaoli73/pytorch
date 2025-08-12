@@ -540,35 +540,41 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
 
     # initialization symmetric memory
     p2p_local = get_allgather_buf(rank)
-    copy_shard(p2p_local, shard)
+    copy_shard(dst=p2p_local, src=shard) # from src
     dist.barrier()
+
     backend_stream = _get_backend_stream()
     backend_stream.wait_stream(torch.xpu.current_stream())
 
-    for step in range(group_size):
+    for step in range(1, group_size):
         if step % 2 == 0:
             stream = torch.xpu.current_stream()
         else:
             stream = backend_stream
         producer_rank = (rank + step) % group_size
+        remote_rank = (rank - step) % group_size
         # print(f"zl_debug producer rank = {producer_rank}", flush=True)
         # Step1: get remote rank input shard
         all_gather_buf = get_allgather_buf(producer_rank)
         # Step2: compute on local symmetric memory
         gemm_output = get_reducescatter_buf(rank, producer_rank)
         # Step: get remote reduce_scatter shard
-        reducescatter_buf = get_reducescatter_buf(producer_rank, rank)
+        reducescatter_buf = get_reducescatter_buf(remote_rank, rank)
         # print(f"zl_debug producer shape = {all_gather_buf.shape} comsumer shape = {reducescatter_buf.shape} "
         #       f"intermediate_chunk shape = {intermediate_chunks[producer_rank].shape} "
         #       f"output_shard={outputs_chunk[producer_rank].shape}", flush=True)
-
         with stream:
             copy_shard(dst=intermediate_chunks[producer_rank], src=all_gather_buf) # allgather
             # print(f"zl_debug copy shard from {producer_rank} to get {intermediate_chunks[producer_rank]} gemm_output={gemm_output.shape}", flush=True)
             shard_consumer(intermediate_chunks[producer_rank], gemm_output) # compute on symmetric memory
             # print(f"zl_debug after matmul to get {gemm_output}", flush=True)
             dist.barrier()
-            symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[producer_rank], outputs_chunk[producer_rank].numel())  # src, dst
+            symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[remote_rank], outputs_chunk[remote_rank].numel())  # src, dst
+
+    # At this point, all ranks have copied their local shard to
+    # their local p2p buffer. Each rank can now copy and consume
+    # remote shards.
+    shard_consumer(p2p_local, outputs_chunk[rank])
 
     torch.xpu.current_stream().wait_stream(backend_stream)
     # symm_mem.barrier(channel=0)
