@@ -10,6 +10,7 @@ from functools import partial
 from typing import Any, Callable, Literal, Optional
 
 import torch
+import numpy as np
 import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
@@ -381,11 +382,11 @@ lib.define(
     "Tensor A, Tensor[] Bs, int gather_dim, str group_name, *, bool return_A = True) -> (Tensor?, Tensor[])",
     tags=[torch._C.Tag.needs_fixed_stride_order],
 )
-lib.define(
-    "fused_all_gather_matmul_reducescatter("
-    "Tensor A_shard, Tensor Bs, str group_name) -> Tensor",
-    tags=[torch._C.Tag.needs_fixed_stride_order],
-)
+# lib.define(
+#     "fused_all_gather_matmul_reducescatter("
+#     "Tensor A_shard, Tensor Bs, str group_name) -> Tensor",
+#     tags=[torch._C.Tag.needs_fixed_stride_order],
+# )
 lib.define(
     "fused_all_gather_scaled_matmul("
     "Tensor A, Tensor[] Bs, Tensor A_scale, Tensor[] B_scales, "
@@ -449,10 +450,11 @@ def _check_and_verify_fp8_all_gather_scale_mode(
         )
 
 # zl_debug_kernel
-@torch.library.impl(lib, "fused_all_gather_matmul_reducescatter", "XPU")
+# @torch.library.impl(lib, "fused_all_gather_matmul_reducescatter", "XPU")
 def _fused_all_gather_matmul_reducescatter(
     A_shard: torch.Tensor,
-    Bs: torch.Tensor,
+    shard_consumer: Callable[[torch.Tensor, torch.Tensor], None],
+    N_dim: int,
     group_name: str,
 ) -> torch.Tensor:
     if A_shard.dim() < 2:
@@ -473,17 +475,12 @@ def _fused_all_gather_matmul_reducescatter(
         A_shard_flat.shape[1],
     )
 
-    stacked_partials = A_flat.new_empty(A_flat.shape[0] * group.size(), Bs.shape[1], dtype=Bs.dtype)
-
-    mm_out_op = torch.ops.aten.mm.out
-    def default_consumer(shard_in: torch.Tensor, shard_out: torch.Tensor) -> None:
-        # print(f"zl_debug in shard comumer {shard_in} {Bs}", flush=True)
-        mm_out_op(shard_in, Bs, out=shard_out)
+    stacked_partials = A_flat.new_empty(A_flat.shape[0] * group.size(), N_dim, dtype=A_flat.dtype)
 
     # print(f"zl_debug A_shard_flat = {A_shard_flat.shape} output = {stacked_partials.shape}", flush=True)
     _pipelined_all_gather_and_reduce_scatter_consume(
         A_shard_flat,
-        default_consumer,
+        shard_consumer,
         stacked_partials,
         group_name,
     )
@@ -546,7 +543,7 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
     backend_stream = _get_backend_stream()
     backend_stream.wait_stream(torch.xpu.current_stream())
 
-    prefecth = False
+    prefetch = False
     for step in range(1, group_size):
         if step % 2 == 0:
             stream = torch.xpu.current_stream()
@@ -569,15 +566,16 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
         #       f"intermediate_chunk shape = {intermediate_chunks[producer_rank].shape} "
         #       f"output_shard={outputs_chunk[producer_rank].shape}", flush=True)
         with stream:
-            if prefecth:
+            if prefetch == False:
                 copy_shard(dst=intermediate_chunks[producer_rank], src=all_gather_buf) # allgather
             # print(f"zl_debug copy shard from {producer_rank} to get {intermediate_chunks[producer_rank]} gemm_output={gemm_output.shape}", flush=True)
             shard_consumer(intermediate_chunks[producer_rank], gemm_output) # compute on symmetric memory
             # print(f"zl_debug after matmul to get {gemm_output}", flush=True)
             # prefecth next all_gather and copy
         with prefecth_stream:
-            prefecth = True
-            copy_shard(dst=intermediate_chunks[prefech_producer_rank], src=prefecth_allgather_buf)  # allgather
+            if prefech_producer_rank != rank:
+                prefetch = True
+                copy_shard(dst=intermediate_chunks[prefech_producer_rank], src=prefecth_allgather_buf)  # allgather
         with stream:
             dist.barrier()
             symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[remote_rank], outputs_chunk[remote_rank].numel())  # src, dst

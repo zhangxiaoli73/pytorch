@@ -1,9 +1,11 @@
+import time
 
 import os
 from contextlib import nullcontext
 from unittest import skip, skipIf
 
 import torch
+import time
 import torch.distributed as dist
 from torch.distributed._symmetric_memory import (
     _fused_all_gather_matmul_fallback,
@@ -23,9 +25,6 @@ dist.init_process_group(backend='xccl')
 group_name = dist.group.WORLD.group_name
 
 enable_profile=False
-
-def matmul_shard_consumer(in_shard: torch.Tensor, Bs: torch.Tensor, out: torch.Tensor) -> None:
-    out.copy_(torch.matmul(in_shard, Bs))
 
 def check_value(out1: torch.Tensor, out2: torch.Tensor) -> bool:
     host1 = out1.cpu().flatten()
@@ -59,6 +58,9 @@ def test_pipeline(rank: int, world_size: int):
     B = torch.randn(K, N, device="xpu")
     print(f"zl_debug A = {A_shard} B = {B}", flush=True)
 
+    def matmul_shard_consumer(in_shard: torch.Tensor, out: torch.Tensor) -> None:
+        out.copy_(torch.matmul(in_shard, B))
+
     # === 校验 A_full ===
     gathered = [torch.zeros_like(A_shard) for _ in range(world_size)]
     dist.all_gather(gathered, A_shard)
@@ -76,12 +78,14 @@ def test_pipeline(rank: int, world_size: int):
     # 调用 fused API
     with prof:
         for count in range(10):
-            final_outputs = torch.ops.symm_mem.fused_all_gather_matmul_reducescatter(
+            final_outputs = _fused_all_gather_matmul_reducescatter(
+                shard_consumer=matmul_shard_consumer,
                 A_shard=A_shard,
-                Bs=B,
+                N_dim=B.shape[1],
                 group_name=group_name,  # 默认进程组
             )
-        torch.xpu.synchronize()
+            torch.xpu.synchronize()
+            time.sleep(0.005)
     if enable_profile:
          prof.export_chrome_trace("./profile_kineto_trace_" + str(rank) + ".json")
 
