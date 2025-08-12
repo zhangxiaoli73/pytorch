@@ -27,6 +27,15 @@ enable_profile=False
 def matmul_shard_consumer(in_shard: torch.Tensor, Bs: torch.Tensor, out: torch.Tensor) -> None:
     out.copy_(torch.matmul(in_shard, Bs))
 
+def check_value(out1: torch.Tensor, out2: torch.Tensor) -> bool:
+    host1 = out1.cpu().flatten()
+    host2 = out2.cpu().flatten()
+
+    for idx, (e1, e2) in enumerate(zip(host1, host2)):
+        if e1.item() != e2.item():
+            print(f"!!! Check failed at index {idx}: {e1.item()} != {e2.item()}")
+    return True
+
 def test_pipeline(rank: int, world_size: int):
     torch.manual_seed(1234 + rank)
     torch.xpu.set_device(rank)
@@ -40,9 +49,9 @@ def test_pipeline(rank: int, world_size: int):
         )
     else:
         prof = nullcontext()
-    rows_per_rank = 2
-    K = 4
-    N = 3
+    rows_per_rank = 2048 #2
+    K = 1536 #4
+    N = 4096 #3
 
     # 每个 rank 的 A_shard
     A_shard = torch.randn(rows_per_rank, K, device="xpu")
@@ -78,6 +87,7 @@ def test_pipeline(rank: int, world_size: int):
 
     print(f"DONE!!!!!!!!!!!!! {final_outputs.shape}", flush=True)
     # print(f"fused kernel {final_outputs} fallback = {scatter}")
+    check_value(final_outputs, scatter)
     assert torch.allclose(scatter, final_outputs)
     dist.destroy_process_group()
 
