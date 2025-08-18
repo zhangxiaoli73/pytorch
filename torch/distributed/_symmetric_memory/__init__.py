@@ -457,6 +457,22 @@ def _fused_all_gather_matmul_reducescatter(
     N_dim: int,
     group_name: str,
 ) -> torch.Tensor:
+    if True:
+        all_hidden_states = torch.empty(8192, 4096, dtype=A_shard.dtype, device="xpu")
+        dist.all_gather_into_tensor(all_hidden_states, A_shard)
+        print(f"[PyTorch] zl_debug start to do fused op, all hideen states = {all_hidden_states.shape}", flush=True)
+        first_hidden_states = all_hidden_states[:all_hidden_states.size(0)//2, :]
+        second_hidden_states = all_hidden_states[all_hidden_states.size(0)//2:, :]
+
+        all_output = torch.ones_like(all_hidden_states)
+        first_output = all_output[:all_output.size(0)//2, :]
+        second_output = all_output[:all_output.size(0)//2, :]
+
+        shard_consumer(first_hidden_states, first_output)
+        shard_consumer(second_hidden_states, second_output)
+        all_output = (first_output + second_output)/2
+        return  all_output
+
     if A_shard.dim() < 2:
         raise ValueError("A_shard must be a matrix")
 
@@ -568,7 +584,7 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
         with stream:
             if prefetch == False:
                 copy_shard(dst=intermediate_chunks[producer_rank], src=all_gather_buf) # allgather
-            # print(f"zl_debug copy shard from {producer_rank} to get {intermediate_chunks[producer_rank]} gemm_output={gemm_output.shape}", flush=True)
+            #print(f"zl_debug copy shard from {producer_rank} to get {intermediate_chunks[producer_rank]} gemm_output={gemm_output.shape}", flush=True)
             shard_consumer(intermediate_chunks[producer_rank], gemm_output) # compute on symmetric memory
             # print(f"zl_debug after matmul to get {gemm_output}", flush=True)
             # prefecth next all_gather and copy
