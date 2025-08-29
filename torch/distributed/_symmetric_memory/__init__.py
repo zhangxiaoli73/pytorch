@@ -559,21 +559,16 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
     backend_stream = _get_backend_stream()
     backend_stream.wait_stream(torch.xpu.current_stream())
 
-    prefetch = False
     for step in range(1, group_size):
         if step % 2 == 0:
             stream = torch.xpu.current_stream()
-            prefecth_stream = backend_stream
         else:
             stream = backend_stream
-            prefecth_stream = torch.xpu.current_stream()
         producer_rank = (rank + step) % group_size
-        prefech_producer_rank = (rank + step + 1) % group_size
         remote_rank = (rank - step) % group_size
         # print(f"zl_debug producer rank = {producer_rank}", flush=True)
         # Step1: get remote rank input shard
         all_gather_buf = get_allgather_buf(producer_rank)
-        prefecth_allgather_buf = get_allgather_buf(prefech_producer_rank)
         # Step2: compute on local symmetric memory
         gemm_output = get_reducescatter_buf(rank, producer_rank)
         # Step: get remote reduce_scatter shard
@@ -582,20 +577,12 @@ def _pipelined_all_gather_and_reduce_scatter_consume(
         #       f"intermediate_chunk shape = {intermediate_chunks[producer_rank].shape} "
         #       f"output_shard={outputs_chunk[producer_rank].shape}", flush=True)
         with stream:
-            if prefetch == False:
-                copy_shard(dst=intermediate_chunks[producer_rank], src=all_gather_buf) # allgather
-            #print(f"zl_debug copy shard from {producer_rank} to get {intermediate_chunks[producer_rank]} gemm_output={gemm_output.shape}", flush=True)
+            copy_shard(dst=intermediate_chunks[producer_rank], src=all_gather_buf) # allgather
+            # print(f"zl_debug copy shard from {producer_rank} to get {intermediate_chunks[producer_rank]} gemm_output={gemm_output.shape}", flush=True)
             shard_consumer(intermediate_chunks[producer_rank], gemm_output) # compute on symmetric memory
             # print(f"zl_debug after matmul to get {gemm_output}", flush=True)
-            # prefecth next all_gather and copy
-        with prefecth_stream:
-            if prefech_producer_rank != rank:
-                prefetch = True
-                copy_shard(dst=intermediate_chunks[prefech_producer_rank], src=prefecth_allgather_buf)  # allgather
-        with stream:
             dist.barrier()
-            copy_shard(dst=outputs_chunk[remote_rank], src=reducescatter_buf)
-            # symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[remote_rank], outputs_chunk[remote_rank].numel())  # src, dst
+            symm_mem.copy_buffer(reducescatter_buf, outputs_chunk[remote_rank], outputs_chunk[remote_rank].numel())  # src, dst
 
     # At this point, all ranks have copied their local shard to
     # their local p2p buffer. Each rank can now copy and consume
