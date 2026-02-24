@@ -95,6 +95,7 @@ if(USE_XPU)
     message(WARNING "Not compiling with XPU. Could NOT find SYCL. "
     "Suppress this warning with -DUSE_XPU=OFF.")
     caffe2_update_option(USE_XPU OFF)
+    caffe2_update_option(USE_LEVEL_ZERO OFF)
   endif()
   foreach(flag ${XPU_HOST_CXX_FLAGS})
     add_definitions(${flag})

@@ -14,6 +14,14 @@ if(NOT SYCL_FOUND)
   # Exit early to avoid populating XPU_HOST_CXX_FLAGS.
   return()
 endif()
+# Find LevelZero library.
+if(USE_LEVEL_ZERO)
+  find_package(LevelZero REQUIRED)
+  if(NOT LevelZero_FOUND)
+    set(PYTORCH_FOUND_XPU FALSE)
+    return()
+  endif()
+endif()
 set(PYTORCH_FOUND_XPU TRUE)
 
 # SYCL library interface
@@ -26,11 +34,29 @@ set_property(
     TARGET torch::sycl PROPERTY INTERFACE_LINK_LIBRARIES
     ${SYCL_LIBRARY})
 
+# LevelZero library interface
+if(USE_LEVEL_ZERO)
+  add_library(torch::level_zero INTERFACE IMPORTED)
+
+  set_property(
+      TARGET torch::level_zero PROPERTY INTERFACE_INCLUDE_DIRECTORIES
+      ${LevelZero_INCLUDE_DIR})
+  set_property(
+      TARGET torch::level_zero PROPERTY INTERFACE_LINK_LIBRARIES
+      ${LevelZero_LIBRARY})
+endif()
+
 # xpurt
 add_library(torch::xpurt INTERFACE IMPORTED)
+
+set(xpurt_deps torch::sycl)
+if(USE_LEVEL_ZERO)
+  list(APPEND xpurt_deps torch::level_zero)
+endif()
+
 set_property(
     TARGET torch::xpurt PROPERTY INTERFACE_LINK_LIBRARIES
-    torch::sycl)
+    "${xpurt_deps}")
 
 # setting xpu arch flags
 torch_xpu_get_arch_list(XPU_ARCH_FLAGS)
